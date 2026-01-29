@@ -1,0 +1,22 @@
+# MCP Server for Project Indexing
+# Install: pip install -r requirements.txt
+
+# Core MCP
+mcp>=1.0.0
+
+# Vector DB - use chromadb-client for lighter install without ML dependencies
+# или chromadb>=0.5.0 если нужна полная версия
+chromadb-client>=0.5.0
+
+# OpenAI
+openai>=1.0.0
+
+# File processing
+python-dotenv>=1.0.0
+pathspec>=0.11.0
+aiofiles>=23.0.0
+tiktoken>=0.5.0
+pyyaml>=6.0
+
+# Data validation (flexible version)
+pydantic>=1.9,<3.0

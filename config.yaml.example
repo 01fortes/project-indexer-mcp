@@ -1,0 +1,60 @@
+# File patterns to include during indexing
+include_patterns:
+  - "**/*.py"
+  - "**/*.js"
+  - "**/*.ts"
+  - "**/*.tsx"
+  - "**/*.jsx"
+  - "**/*.java"
+  - "**/*.cpp"
+  - "**/*.c"
+  - "**/*.h"
+  - "**/*.go"
+  - "**/*.rs"
+  - "**/*.rb"
+  - "**/*.php"
+  - "**/*.swift"
+  - "**/*.kt"
+  - "**/*.scala"
+  - "**/*.md"
+  - "**/*.yaml"
+  - "**/*.yml"
+  - "**/*.json"
+  - "**/*.toml"
+
+# Patterns to always exclude
+exclude_patterns:
+  - "**/node_modules/**"
+  - "**/venv/**"
+  - "**/.venv/**"
+  - "**/env/**"
+  - "**/__pycache__/**"
+  - "**/.git/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/*.min.js"
+  - "**/*.min.css"
+  - "**/.next/**"
+  - "**/.cache/**"
+  - "**/coverage/**"
+  - "**/*.lock"
+  - "**/package-lock.json"
+  - "**/yarn.lock"
+  - "**/poetry.lock"
+
+# Binary/media file extensions to skip
+binary_extensions:
+  - .png
+  - .jpg
+  - .jpeg
+  - .gif
+  - .pdf
+  - .zip
+  - .tar
+  - .gz
+  - .ico
+  - .woff
+  - .woff2
+  - .ttf
+  - .eot
+  - .pyc

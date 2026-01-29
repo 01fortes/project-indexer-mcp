@@ -1,0 +1,168 @@
+"""Configuration management for the project indexer."""
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+import yaml
+from dotenv import load_dotenv
+
+
+@dataclass
+class OpenAIConfig:
+    """OpenAI API configuration."""
+
+    api_key: str
+    model: str = "gpt-4o-mini"
+    embedding_model: str = "text-embedding-3-small"
+    max_retries: int = 3
+    timeout: int = 60
+
+
+@dataclass
+class ChromaConfig:
+    """ChromaDB configuration."""
+
+    host: Optional[str] = None
+    port: Optional[int] = None
+    persist_directory: str = "./chroma_data"
+
+
+@dataclass
+class IndexingConfig:
+    """Indexing behavior configuration."""
+
+    max_file_size_mb: float = 1.0
+    max_chunk_size_tokens: int = 6000
+    chunk_overlap_tokens: int = 500
+    max_concurrent_files: int = 5
+    rate_limit_rpm: int = 3500  # Requests per minute
+    rate_limit_tpm: int = 1000000  # Tokens per minute
+
+
+@dataclass
+class ServerConfig:
+    """MCP server configuration."""
+
+    log_level: str = "INFO"
+    name: str = "project-indexer"
+    version: str = "1.0.0"
+
+
+@dataclass
+class FilePatterns:
+    """File patterns for scanning."""
+
+    include: List[str] = field(default_factory=lambda: [
+        "**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx",
+        "**/*.java", "**/*.cpp", "**/*.c", "**/*.h",
+        "**/*.go", "**/*.rs", "**/*.rb", "**/*.php",
+        "**/*.swift", "**/*.kt", "**/*.scala",
+        "**/*.md", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.toml"
+    ])
+    exclude: List[str] = field(default_factory=lambda: [
+        "**/node_modules/**", "**/venv/**", "**/.venv/**", "**/env/**",
+        "**/__pycache__/**", "**/.git/**", "**/dist/**", "**/build/**",
+        "**/*.min.js", "**/*.min.css", "**/.next/**", "**/.cache/**",
+        "**/coverage/**", "**/*.lock", "**/package-lock.json",
+        "**/yarn.lock", "**/poetry.lock"
+    ])
+    binary_extensions: List[str] = field(default_factory=lambda: [
+        ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".tar", ".gz",
+        ".ico", ".woff", ".woff2", ".ttf", ".eot", ".pyc"
+    ])
+
+
+@dataclass
+class Config:
+    """Main configuration container."""
+
+    openai: OpenAIConfig
+    chroma: ChromaConfig
+    indexing: IndexingConfig
+    server: ServerConfig
+    patterns: FilePatterns
+
+
+def load_config(config_path: Optional[Path] = None) -> Config:
+    """
+    Load configuration from environment variables and YAML file.
+
+    Args:
+        config_path: Path to config.yaml file. If None, looks for config.yaml in current directory.
+
+    Returns:
+        Config object with all settings.
+
+    Raises:
+        ValueError: If required configuration is missing.
+    """
+    # Load environment variables
+    load_dotenv()
+
+    # OpenAI configuration (required)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY environment variable is required. "
+            "Set it in .env file or export it."
+        )
+
+    openai_config = OpenAIConfig(
+        api_key=api_key,
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "3")),
+        timeout=int(os.getenv("OPENAI_TIMEOUT", "60")),
+    )
+
+    # ChromaDB configuration
+    chroma_host = os.getenv("CHROMA_HOST")
+    chroma_port = os.getenv("CHROMA_PORT")
+    chroma_config = ChromaConfig(
+        host=chroma_host if chroma_host else None,
+        port=int(chroma_port) if chroma_port else None,
+        persist_directory=os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_data"),
+    )
+
+    # Indexing configuration
+    indexing_config = IndexingConfig(
+        max_file_size_mb=float(os.getenv("MAX_FILE_SIZE_MB", "1.0")),
+        max_chunk_size_tokens=int(os.getenv("MAX_CHUNK_SIZE_TOKENS", "6000")),
+        chunk_overlap_tokens=int(os.getenv("CHUNK_OVERLAP_TOKENS", "500")),
+        max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "5")),
+        rate_limit_rpm=int(os.getenv("RATE_LIMIT_RPM", "3500")),
+        rate_limit_tpm=int(os.getenv("RATE_LIMIT_TPM", "1000000")),
+    )
+
+    # Server configuration
+    server_config = ServerConfig(
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        name=os.getenv("SERVER_NAME", "project-indexer"),
+        version=os.getenv("SERVER_VERSION", "1.0.0"),
+    )
+
+    # Load file patterns from YAML if exists
+    patterns = FilePatterns()
+    if config_path is None:
+        config_path = Path("config.yaml")
+
+    if config_path.exists():
+        with open(config_path) as f:
+            yaml_config = yaml.safe_load(f)
+            if yaml_config:
+                if "include_patterns" in yaml_config:
+                    patterns.include = yaml_config["include_patterns"]
+                if "exclude_patterns" in yaml_config:
+                    patterns.exclude = yaml_config["exclude_patterns"]
+                if "binary_extensions" in yaml_config:
+                    patterns.binary_extensions = yaml_config["binary_extensions"]
+
+    return Config(
+        openai=openai_config,
+        chroma=chroma_config,
+        indexing=indexing_config,
+        server=server_config,
+        patterns=patterns,
+    )
