@@ -48,11 +48,15 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ```
 
 Должно появиться:
-- **project-indexer** с 4 инструментами:
-  - `index_project`
-  - `search_code`
-  - `get_project_info`
-  - `delete_project_index`
+- **project-indexer** с 8 инструментами:
+  - `index_project` - Полная индексация
+  - `search_code` - Поиск с кодом
+  - `search_files` - Поиск файлов
+  - `get_project_info` - Информация о проекте
+  - `list_projects` - Список проектов
+  - `update_files` - Обновить файлы
+  - `remove_files` - Удалить файлы
+  - `delete_project_index` - Удалить проект
 
 ## 6. Первый тест
 
