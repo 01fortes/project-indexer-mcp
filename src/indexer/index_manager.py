@@ -365,16 +365,39 @@ Purpose: {context.purpose}
         file_paths: List[str]
     ) -> Dict:
         """
-        Update or add specific files to the index.
+        Update or add specific files/directories to the index.
 
         Args:
             project_path: Path to project root.
-            file_paths: List of relative file paths to update.
+            file_paths: List of relative file/directory paths to update.
+                       If directory, all files in it will be indexed.
 
         Returns:
             Dictionary with update results.
         """
-        logger.info(f"Updating {len(file_paths)} files in {project_path}")
+        logger.info(f"Processing {len(file_paths)} paths in {project_path}")
+
+        # Expand directories to file lists
+        expanded_files = []
+        for path_str in file_paths:
+            full_path = project_path / path_str
+
+            if full_path.is_dir():
+                # It's a directory - scan it for files
+                logger.info(f"Scanning directory: {path_str}")
+                dir_files = await self._scan_directory(
+                    project_path,
+                    Path(path_str)
+                )
+                expanded_files.extend(dir_files)
+                logger.info(f"Found {len(dir_files)} files in {path_str}")
+            elif full_path.is_file():
+                # It's a file - add directly
+                expanded_files.append(path_str)
+            else:
+                logger.warning(f"Path not found: {path_str}")
+
+        logger.info(f"Total files to update: {len(expanded_files)}")
 
         stats = {
             "updated_files": 0,
@@ -414,16 +437,16 @@ Purpose: {context.purpose}
                 }
 
             # Delete old versions of these files
-            deleted_count = await self.chroma.delete_files_by_path(collection, project_path, file_paths)
+            deleted_count = await self.chroma.delete_files_by_path(collection, project_path, expanded_files)
             logger.info(f"Deleted {deleted_count} old documents")
 
             # Scan and process the specified files
-            from ..indexer.scanner import scan_project
-            from ..utils.file_types import get_file_type, get_language
+            from ..indexer.scanner import detect_language, classify_file_type
+            import hashlib as hash_module
 
             indexed_docs = []
 
-            for file_path_str in file_paths:
+            for file_path_str in expanded_files:
                 file_path = project_path / file_path_str
 
                 if not file_path.exists():
@@ -435,7 +458,6 @@ Purpose: {context.purpose}
                 try:
                     # Create file metadata
                     from ..storage.models import FileMetadata
-                    import hashlib as hash_module
 
                     content = file_path.read_bytes()
                     file_hash = hash_module.sha256(content).hexdigest()
@@ -443,8 +465,8 @@ Purpose: {context.purpose}
                     file_meta = FileMetadata(
                         file_path=file_path,
                         relative_path=Path(file_path_str),
-                        language=get_language(file_path),
-                        file_type=get_file_type(file_path),
+                        language=detect_language(file_path),
+                        file_type=classify_file_type(file_path),
                         file_size=file_path.stat().st_size,
                         last_modified=file_path.stat().st_mtime,
                         hash=file_hash
@@ -487,16 +509,41 @@ Purpose: {context.purpose}
         file_paths: List[str]
     ) -> Dict:
         """
-        Remove specific files from the index.
+        Remove specific files or directories from the index.
 
         Args:
             project_path: Path to project root.
-            file_paths: List of relative file paths to remove.
+            file_paths: List of relative file/directory paths to remove.
+                       If directory, all files in it will be removed.
 
         Returns:
             Dictionary with removal results.
         """
-        logger.info(f"Removing {len(file_paths)} files from {project_path}")
+        logger.info(f"Processing {len(file_paths)} paths for removal from {project_path}")
+
+        # Expand directories to file lists
+        expanded_files = []
+        for path_str in file_paths:
+            full_path = project_path / path_str
+
+            if full_path.is_dir():
+                # It's a directory - scan it for files
+                logger.info(f"Scanning directory for removal: {path_str}")
+                dir_files = await self._scan_directory(
+                    project_path,
+                    Path(path_str)
+                )
+                expanded_files.extend(dir_files)
+                logger.info(f"Found {len(dir_files)} files in {path_str}")
+            elif full_path.is_file():
+                # It's a file - add directly
+                expanded_files.append(path_str)
+            else:
+                # Path doesn't exist - might be already deleted, still try to remove from index
+                logger.info(f"Path not found (may be already deleted): {path_str}, will try to remove from index")
+                expanded_files.append(path_str)
+
+        logger.info(f"Total files to remove: {len(expanded_files)}")
 
         try:
             collection = self.chroma.get_or_create_collection(project_path)
@@ -504,12 +551,13 @@ Purpose: {context.purpose}
             deleted_count = await self.chroma.delete_files_by_path(
                 collection,
                 project_path,
-                file_paths
+                expanded_files
             )
 
             return {
                 "status": "success",
-                "removed_files": len(file_paths),
+                "removed_paths": len(file_paths),
+                "removed_files": len(expanded_files),
                 "removed_chunks": deleted_count
             }
 
@@ -519,3 +567,46 @@ Purpose: {context.purpose}
                 "status": "failed",
                 "error": str(e)
             }
+
+    async def _scan_directory(
+        self,
+        project_path: Path,
+        relative_dir: Path
+    ) -> List[str]:
+        """
+        Scan directory and return list of relative file paths.
+
+        Args:
+            project_path: Project root path.
+            relative_dir: Relative directory path to scan.
+
+        Returns:
+            List of relative file paths.
+        """
+        from ..indexer.scanner import scan_project
+
+        full_dir = project_path / relative_dir
+
+        if not full_dir.is_dir():
+            return []
+
+        # Scan the directory using existing scanner
+        file_metadatas = await scan_project(
+            full_dir,
+            self.config.patterns.include,
+            self.config.patterns.exclude,
+            max_file_size_mb=self.config.indexing.max_file_size_mb
+        )
+
+        # Convert to relative paths from project root
+        relative_paths = []
+        for file_meta in file_metadatas:
+            # Calculate path relative to project root
+            try:
+                rel_path = file_meta.file_path.relative_to(project_path)
+                relative_paths.append(str(rel_path))
+            except ValueError:
+                # File is outside project root, skip
+                logger.warning(f"Skipping file outside project: {file_meta.file_path}")
+
+        return relative_paths

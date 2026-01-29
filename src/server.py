@@ -299,16 +299,26 @@ async def update_files(
     file_paths: list[str]
 ) -> dict:
     """
-    Update or add specific files to the project index.
+    Update or add specific files OR ENTIRE DIRECTORIES to the project index.
+
+    ⚡ SUPPORTS BOTH FILES AND FOLDERS:
+    - Individual files: ["src/main.py", "config.py"]
+    - Entire directories: ["src/api/", "tests/"] (updates ALL files inside recursively)
+    - Mixed: ["src/api/", "main.py", "tests/unit/"]
 
     Use this to:
     - Add new files to an existing index
     - Re-index modified files
+    - Update entire directories/modules
     - Update specific files without re-indexing the entire project
 
     Args:
         project_path: Absolute path to project root
-        file_paths: List of relative file paths to update (e.g., ["src/main.py", "README.md"])
+        file_paths: List of relative paths (files OR directories)
+                   Examples:
+                   - ["src/api/"] - updates all files in src/api/ recursively
+                   - ["src/main.py"] - updates single file
+                   - ["src/api/", "tests/", "config.py"] - mixed files and folders
 
     Returns:
         Dictionary with update results and statistics
@@ -334,14 +344,25 @@ async def remove_files(
     file_paths: list[str]
 ) -> dict:
     """
-    Remove specific files from the project index.
+    Remove specific files OR ENTIRE DIRECTORIES from the project index.
 
-    Use this when files are deleted from the project or should
-    no longer be included in search results.
+    ⚡ SUPPORTS BOTH FILES AND FOLDERS:
+    - Individual files: ["old/deprecated.py", "cache.json"]
+    - Entire directories: ["legacy/", "temp/"] (removes ALL files inside recursively)
+    - Mixed: ["legacy/", "old_script.py", "temp/"]
+
+    Use this when:
+    - Files/folders are deleted from the project
+    - Old code should no longer appear in search results
+    - Removing deprecated modules or directories
 
     Args:
         project_path: Absolute path to project root
-        file_paths: List of relative file paths to remove (e.g., ["old/deprecated.py"])
+        file_paths: List of relative paths (files OR directories)
+                   Examples:
+                   - ["legacy/"] - removes all files in legacy/ recursively
+                   - ["old.py"] - removes single file
+                   - ["legacy/", "temp/", "cache.json"] - mixed files and folders
 
     Returns:
         Dictionary with removal results
