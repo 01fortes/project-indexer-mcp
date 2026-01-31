@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
-from openai import AsyncOpenAI
 
 from .config import load_config
 from .indexer.index_manager import IndexManager
+from .providers import create_providers_from_config
 from .storage.chroma_client import ChromaManager
 from .utils.logger import setup_logger
 from .utils.rate_limiter import RateLimiter
@@ -93,57 +93,18 @@ async def search_code(
     """
     try:
         path = Path(project_path).resolve()
-        collection = chroma.get_or_create_collection(path)
 
-        # Generate query embedding
-        embedding_response = await indexer.openai_client.embeddings.create(
-            input=query,
-            model=config.openai.embedding_model
-        )
-        query_embedding = embedding_response.data[0].embedding
-
-        # Build metadata filter
-        metadata_filter = {}
-        if file_type:
-            metadata_filter["file_type"] = file_type
-        if language:
-            metadata_filter["language"] = language
-
-        # Search
-        results = await chroma.search(
-            collection,
-            query_embedding,
+        # Delegate to IndexManager
+        result = await indexer.search_code(
+            project_path=path,
+            query=query,
             n_results=min(n_results, 50),
-            metadata_filter=metadata_filter if metadata_filter else None
+            file_type=file_type,
+            language=language,
+            include_code=include_code
         )
 
-        # Format results
-        formatted_results = []
-        for r in results:
-            result_dict = {
-                "file_path": r.file_path,
-                "relative_path": r.relative_path,
-                "chunk_index": r.chunk_index,
-                "score": round(r.score, 4),
-                "purpose": r.purpose,
-                "dependencies": r.dependencies,
-                "exported_symbols": r.exported_symbols,
-                "metadata": {
-                    "language": r.metadata.get("language"),
-                    "file_type": r.metadata.get("file_type")
-                }
-            }
-
-            if include_code:
-                result_dict["code"] = r.code
-
-            formatted_results.append(result_dict)
-
-        return {
-            "status": "success",
-            "results": formatted_results,
-            "query": query
-        }
+        return result
 
     except Exception as e:
         logger.error(f"search_code failed: {e}")
@@ -173,34 +134,18 @@ async def get_project_info(project_path: str) -> dict:
                 "message": "Project has not been indexed yet"
             }
 
-        # Try to get project context
-        collection = chroma.get_or_create_collection(path)
-        context_id = chroma.generate_document_id(path, Path("__project_context__"), 0)
+        # Use IndexManager to get project context
+        context = await indexer.get_project_context(path)
 
-        try:
-            result = collection.get(ids=[context_id], include=["metadatas"])
-
-            if result and result["metadatas"]:
-                metadata = result["metadatas"][0]
-
-                return {
-                    "status": "indexed",
-                    "project_id": stats["collection_name"],
-                    "project_context": {
-                        "project_name": metadata.get("project_name"),
-                        "project_description": metadata.get("project_description"),
-                        "tech_stack": metadata.get("tech_stack", []),
-                        "frameworks": metadata.get("frameworks", []),
-                        "architecture_type": metadata.get("architecture_type"),
-                        "purpose": metadata.get("purpose")
-                    },
-                    "indexed_at": metadata.get("indexed_at"),
-                    "stats": {
-                        "total_documents": stats["total_documents"]
-                    }
+        if context:
+            return {
+                "status": "indexed",
+                "project_id": stats["collection_name"],
+                "project_context": context,
+                "stats": {
+                    "total_documents": stats["total_documents"]
                 }
-        except:
-            pass
+            }
 
         return {
             "status": "indexed",
@@ -405,50 +350,14 @@ async def search_files(
     try:
         path = Path(project_path).resolve()
 
-        # Get collection
-        collection = chroma.get_or_create_collection(path)
-
-        # Generate query embedding
-        query_response = await openai_client.embeddings.create(
-            input=query,
-            model=config.openai.embedding_model
-        )
-        query_embedding = query_response.data[0].embedding
-
-        # Search with more results to account for duplicate files
-        results = await chroma.search(
-            collection,
-            query_embedding,
-            n_results=n_results * 3,  # Get more to deduplicate
-            metadata_filter=None
+        # Delegate to IndexManager
+        result = await indexer.search_files(
+            project_path=path,
+            query=query,
+            n_results=n_results
         )
 
-        # Deduplicate by file path and keep best score
-        file_results = {}
-        for result in results:
-            file_path = result.relative_path
-            if file_path not in file_results or result.score > file_results[file_path]["score"]:
-                file_results[file_path] = {
-                    "file_path": result.file_path,
-                    "relative_path": result.relative_path,
-                    "score": result.score,
-                    "purpose": result.purpose,
-                    "language": result.metadata.get("language", "unknown")
-                }
-
-        # Sort by score and limit
-        sorted_files = sorted(
-            file_results.values(),
-            key=lambda x: x["score"],
-            reverse=True
-        )[:n_results]
-
-        return {
-            "status": "success",
-            "query": query,
-            "total_files": len(sorted_files),
-            "files": sorted_files
-        }
+        return result
 
     except Exception as e:
         logger.error(f"search_files failed: {e}")
@@ -470,8 +379,9 @@ def main():
         # Initialize ChromaDB
         chroma = ChromaManager(config.chroma)
 
-        # Initialize OpenAI client
-        openai_client = AsyncOpenAI(api_key=config.openai.api_key)
+        # Create providers from configuration
+        llm_provider, embedding_provider = create_providers_from_config(config)
+        logger.info(f"Using LLM: {llm_provider.model_name}, Embedding: {embedding_provider.model_name}")
 
         # Initialize rate limiter
         rate_limiter = RateLimiter(
@@ -479,8 +389,8 @@ def main():
             tpm=config.indexing.rate_limit_tpm
         )
 
-        # Initialize index manager
-        indexer = IndexManager(config, chroma, openai_client, rate_limiter)
+        # Initialize index manager with providers
+        indexer = IndexManager(config, chroma, llm_provider, embedding_provider, rate_limiter)
 
         logger.info("All components initialized successfully")
 

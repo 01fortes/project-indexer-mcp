@@ -4,8 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from openai import AsyncOpenAI
-
+from ..providers.base import LLMProvider, ChatMessage
 from ..storage.models import ProjectContext
 from ..utils.logger import get_logger
 
@@ -42,7 +41,7 @@ FRAMEWORK_PATTERNS = {
 
 async def analyze_project_context(
     project_path: Path,
-    openai_client: AsyncOpenAI
+    llm_provider: LLMProvider
 ) -> ProjectContext:
     """
     Analyze project to understand overall context.
@@ -52,12 +51,12 @@ async def analyze_project_context(
     2. Finds and reads configuration files
     3. Detects tech stack and frameworks
     4. Reads README and documentation
-    5. Sends to OpenAI for contextual understanding
+    5. Sends to LLM for contextual understanding
     6. Returns ProjectContext object
 
     Args:
         project_path: Path to project root.
-        openai_client: OpenAI async client.
+        llm_provider: LLM provider for analysis.
 
     Returns:
         ProjectContext with project information.
@@ -73,25 +72,52 @@ async def analyze_project_context(
     # Step 3: Read key documentation files
     docs = await read_key_files(project_path)
 
-    # Step 4: Prepare prompt for OpenAI
+    # Step 4: Prepare prompt
     prompt = _build_context_prompt(project_path, file_tree, tech_info, docs)
 
-    # Step 5: Call OpenAI using Responses API
-    try:
-        response = await openai_client.responses.create(
-            model="gpt-5.2-codex",
-            input=prompt,
-            instructions="You are a code analysis expert. Analyze project structure and provide JSON output.",
-            text={
-                "format": {"type": "json_object"}
+    # Step 5: Define JSON schema for response
+    schema = {
+        "name": "project_context",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string"},
+                "project_description": {"type": "string"},
+                "tech_stack": {"type": "array", "items": {"type": "string"}},
+                "frameworks": {"type": "array", "items": {"type": "string"}},
+                "dependencies": {"type": "array", "items": {"type": "string"}},
+                "architecture_type": {"type": "string"},
+                "project_structure": {"type": "string"},
+                "key_entry_points": {"type": "array", "items": {"type": "string"}},
+                "build_system": {"type": "string"},
+                "purpose": {"type": "string"}
             },
-            reasoning={
-                "effort": "high"  # High reasoning for project context analysis
-            }
+            "required": ["project_name", "project_description", "tech_stack", "frameworks",
+                        "dependencies", "architecture_type", "project_structure",
+                        "key_entry_points", "build_system", "purpose"],
+            "additionalProperties": False
+        }
+    }
+
+    # Step 6: Call LLM provider
+    try:
+        response = await llm_provider.chat_completion(
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content="You are a code analysis expert. Analyze project structure and provide JSON output."
+                ),
+                ChatMessage(
+                    role="user",
+                    content=prompt
+                )
+            ],
+            response_format={"type": "json_schema", "json_schema": schema}
         )
 
         # Parse response
-        result = json.loads(response.output_text)
+        result = json.loads(response.content)
 
         context = ProjectContext(
             project_name=result.get("project_name", project_path.name),

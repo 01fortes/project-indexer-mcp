@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Indexer Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-out;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="app" class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b">
+            <div class="container mx-auto px-4 py-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h1 class="text-3xl font-bold text-gray-900">📚 Project Indexer</h1>
+                        <p class="text-gray-600 mt-1">Административная панель управления индексами</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <div class="text-right">
+                            <div class="text-sm text-gray-500">Статус сервера</div>
+                            <div class="text-lg font-semibold" :class="serverStatus === '🟢' ? 'text-green-600' : 'text-red-600'">
+                                {{ serverStatus }} {{ serverStatus === '🟢' ? 'Работает' : 'Недоступен' }}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="container mx-auto px-4 py-8">
+            <!-- Stats Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-white rounded-lg shadow p-6 border-l-4 border-blue-500">
+                    <div class="text-gray-500 text-sm font-medium">Всего проектов</div>
+                    <div class="text-4xl font-bold text-blue-600 mt-2">{{ totalProjects }}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-6 border-l-4 border-green-500">
+                    <div class="text-gray-500 text-sm font-medium">Файлов проиндексировано</div>
+                    <div class="text-4xl font-bold text-green-600 mt-2">{{ totalFiles }}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-6 border-l-4 border-purple-500">
+                    <div class="text-gray-500 text-sm font-medium">API эндпоинты</div>
+                    <div class="text-4xl font-bold text-purple-600 mt-2">6</div>
+                </div>
+            </div>
+
+            <!-- Projects List -->
+            <div class="bg-white rounded-lg shadow">
+                <div class="p-6 border-b border-gray-200">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-2xl font-semibold text-gray-800">Проекты</h2>
+                        <button
+                            @click="loadProjects"
+                            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+                        >
+                            🔄 Обновить
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div v-if="loading" class="p-12 text-center">
+                    <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+                    <p class="text-gray-500 mt-4">Загрузка проектов...</p>
+                </div>
+
+                <!-- Empty State -->
+                <div v-else-if="projects.length === 0" class="p-12 text-center">
+                    <div class="text-6xl mb-4">📂</div>
+                    <h3 class="text-xl font-semibold text-gray-700 mb-2">Нет проектов</h3>
+                    <p class="text-gray-500">Используйте MCP сервер для индексации проектов</p>
+                </div>
+
+                <!-- Projects List -->
+                <div v-else class="divide-y divide-gray-200">
+                    <div
+                        v-for="project in projects"
+                        :key="project.collection_name"
+                        class="p-6 hover:bg-gray-50 transition cursor-pointer"
+                        @click="selectProject(project)"
+                    >
+                        <div class="flex justify-between items-start">
+                            <div class="flex-1">
+                                <div class="flex items-center gap-3">
+                                    <h3 class="text-lg font-semibold text-gray-800">
+                                        {{ project.project_name }}
+                                    </h3>
+                                    <span class="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded">
+                                        {{ project.architecture_type }}
+                                    </span>
+                                </div>
+                                <p class="text-sm text-gray-600 mt-1">📁 {{ project.project_path }}</p>
+
+                                <!-- Tech Stack -->
+                                <div class="flex gap-2 mt-3 flex-wrap">
+                                    <span
+                                        v-for="tech in project.tech_stack.slice(0, 5)"
+                                        :key="tech"
+                                        class="px-3 py-1 text-xs bg-blue-100 text-blue-800 rounded-full font-medium"
+                                    >
+                                        {{ tech }}
+                                    </span>
+                                    <span
+                                        v-if="project.tech_stack.length > 5"
+                                        class="px-3 py-1 text-xs bg-gray-100 text-gray-600 rounded-full"
+                                    >
+                                        +{{ project.tech_stack.length - 5 }}
+                                    </span>
+                                </div>
+
+                                <!-- Frameworks -->
+                                <div v-if="project.frameworks.length > 0" class="flex gap-2 mt-2 flex-wrap">
+                                    <span
+                                        v-for="framework in project.frameworks.slice(0, 3)"
+                                        :key="framework"
+                                        class="px-3 py-1 text-xs bg-green-100 text-green-800 rounded-full"
+                                    >
+                                        🛠️ {{ framework }}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div class="text-right ml-4">
+                                <div class="text-2xl font-bold text-gray-700">
+                                    {{ project.total_files }}
+                                </div>
+                                <div class="text-sm text-gray-500">файлов</div>
+                                <div class="text-xs text-gray-400 mt-2">
+                                    {{ formatDate(project.indexed_at) }}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Selected Project Details Modal -->
+            <div v-if="selectedProject" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" @click="selectedProject = null">
+                <div class="bg-white rounded-lg shadow-xl max-w-5xl w-full max-h-[90vh] overflow-auto" @click.stop>
+                    <div class="p-6 border-b border-gray-200">
+                        <div class="flex items-center justify-between">
+                            <div class="flex-1">
+                                <h3 class="text-2xl font-bold text-gray-800">{{ selectedProject.project_name }}</h3>
+                                <p class="text-gray-600 mt-1">{{ selectedProject.project_path }}</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button
+                                    @click="confirmDeleteProject"
+                                    class="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+                                    title="Удалить проект из индекса"
+                                >
+                                    🗑️ Удалить
+                                </button>
+                                <button @click="selectedProject = null" class="text-gray-400 hover:text-gray-600 text-2xl">×</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tabs -->
+                    <div class="border-b border-gray-200">
+                        <div class="flex">
+                            <button
+                                @click="currentTab = 'info'"
+                                :class="currentTab === 'info' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+                                class="py-4 px-6 border-b-2 font-medium text-sm"
+                            >
+                                📊 Информация
+                            </button>
+                            <button
+                                @click="currentTab = 'files'"
+                                :class="currentTab === 'files' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+                                class="py-4 px-6 border-b-2 font-medium text-sm"
+                            >
+                                📁 Файлы ({{ selectedProject.total_files }})
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="p-6">
+                        <!-- Info Tab -->
+                        <div v-if="currentTab === 'info'" class="space-y-4">
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">Архитектура</h4>
+                                <span class="px-3 py-1 bg-gray-100 text-gray-700 rounded-lg">{{ selectedProject.architecture_type }}</span>
+                            </div>
+
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">Tech Stack</h4>
+                                <div class="flex flex-wrap gap-2">
+                                    <span v-for="tech in selectedProject.tech_stack" :key="tech"
+                                          class="px-3 py-1 bg-blue-100 text-blue-800 rounded-lg text-sm">
+                                        {{ tech }}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div v-if="selectedProject.frameworks.length > 0">
+                                <h4 class="font-semibold text-gray-700 mb-2">Frameworks</h4>
+                                <div class="flex flex-wrap gap-2">
+                                    <span v-for="framework in selectedProject.frameworks" :key="framework"
+                                          class="px-3 py-1 bg-green-100 text-green-800 rounded-lg text-sm">
+                                        {{ framework }}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">Статистика</h4>
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div class="bg-gray-50 p-3 rounded-lg">
+                                        <div class="text-sm text-gray-600">Всего файлов</div>
+                                        <div class="text-2xl font-bold text-gray-800">{{ selectedProject.total_files }}</div>
+                                    </div>
+                                    <div class="bg-gray-50 p-3 rounded-lg">
+                                        <div class="text-sm text-gray-600">Дата индексации</div>
+                                        <div class="text-lg font-semibold text-gray-800">{{ formatDate(selectedProject.indexed_at) }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Files Tab -->
+                        <div v-if="currentTab === 'files'" class="space-y-4">
+                            <!-- Loading -->
+                            <div v-if="loadingFiles" class="text-center py-8">
+                                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                                <p class="text-gray-500 mt-2">Загрузка файлов...</p>
+                            </div>
+
+                            <!-- Files List -->
+                            <div v-else>
+                                <div class="mb-4 flex justify-between items-center">
+                                    <p class="text-gray-600">Всего файлов: <span class="font-semibold">{{ projectFiles.length }}</span></p>
+                                    <input
+                                        v-model="fileSearchQuery"
+                                        type="text"
+                                        placeholder="Поиск по имени файла..."
+                                        class="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+
+                                <div class="space-y-2 max-h-96 overflow-y-auto">
+                                    <div
+                                        v-for="file in filteredFiles"
+                                        :key="file.relative_path"
+                                        class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition"
+                                    >
+                                        <div
+                                            @click="viewFileContent(file)"
+                                            class="flex-1 min-w-0 cursor-pointer"
+                                        >
+                                            <div class="flex items-center gap-2">
+                                                <span class="text-gray-700 font-mono text-sm truncate">
+                                                    {{ file.relative_path }}
+                                                </span>
+                                                <span class="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">
+                                                    {{ file.language }}
+                                                </span>
+                                            </div>
+                                            <p class="text-xs text-gray-500 mt-1 truncate">{{ file.purpose }}</p>
+                                        </div>
+                                        <div class="flex items-center gap-3 ml-4">
+                                            <span class="text-xs text-gray-500">
+                                                {{ file.chunks }} {{ file.chunks === 1 ? 'чанк' : 'чанка' }}
+                                            </span>
+                                            <span :class="getFileTypeColor(file.file_type)" class="px-2 py-1 text-xs rounded">
+                                                {{ file.file_type }}
+                                            </span>
+                                            <button
+                                                @click.stop="updateFileIndex(file)"
+                                                class="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+                                                title="Обновить индекс файла"
+                                                :disabled="file.updating"
+                                            >
+                                                <span v-if="file.updating">⏳</span>
+                                                <span v-else>🔄</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div v-if="filteredFiles.length === 0" class="text-center py-8 text-gray-500">
+                                    Файлы не найдены
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- File Content Modal -->
+        <div v-if="selectedFile" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" @click="selectedFile = null">
+            <div class="bg-white rounded-lg shadow-xl max-w-6xl w-full max-h-[90vh] overflow-auto" @click.stop>
+                <div class="p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
+                    <div class="flex items-center justify-between">
+                        <div class="flex-1 min-w-0">
+                            <h3 class="text-xl font-bold text-gray-800 font-mono truncate">{{ selectedFile.file_path }}</h3>
+                            <div class="flex items-center gap-2 mt-2">
+                                <span class="px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded">
+                                    {{ selectedFile.language }}
+                                </span>
+                                <span :class="getFileTypeColor(selectedFile.file_type)" class="px-2 py-1 text-xs rounded">
+                                    {{ selectedFile.file_type }}
+                                </span>
+                                <span class="px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded">
+                                    {{ selectedFile.total_chunks }} {{ selectedFile.total_chunks === 1 ? 'чанк' : 'чанка' }}
+                                </span>
+                            </div>
+                        </div>
+                        <button @click="selectedFile = null" class="text-gray-400 hover:text-gray-600 text-2xl ml-4">×</button>
+                    </div>
+                </div>
+
+                <!-- Loading -->
+                <div v-if="loadingFileContent" class="p-12 text-center">
+                    <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+                    <p class="text-gray-500 mt-4">Загрузка содержимого...</p>
+                </div>
+
+                <!-- Content -->
+                <div v-else class="p-6">
+                    <div v-if="fileChunks.length === 0" class="text-center py-8 text-gray-500">
+                        Содержимое не найдено
+                    </div>
+
+                    <div v-else class="space-y-6">
+                        <!-- Chunk -->
+                        <div
+                            v-for="chunk in fileChunks"
+                            :key="chunk.chunk_index"
+                            class="border border-gray-200 rounded-lg overflow-hidden"
+                        >
+                            <!-- Chunk Header -->
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center gap-3">
+                                        <span class="font-semibold text-gray-700">
+                                            Чанк {{ chunk.chunk_index + 1 }} / {{ chunk.total_chunks }}
+                                        </span>
+                                        <span v-if="chunk.purpose" class="text-sm text-gray-600">
+                                            {{ chunk.purpose }}
+                                        </span>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <button
+                                            @click="copyToClipboard(chunk.content)"
+                                            class="px-2 py-1 text-xs bg-white border border-gray-300 rounded hover:bg-gray-50"
+                                        >
+                                            📋 Копировать
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Metadata -->
+                                <div v-if="chunk.dependencies.length > 0 || chunk.exported_symbols.length > 0" class="mt-3 space-y-2">
+                                    <div v-if="chunk.dependencies.length > 0" class="flex items-start gap-2">
+                                        <span class="text-xs font-medium text-gray-600">Зависимости:</span>
+                                        <div class="flex flex-wrap gap-1">
+                                            <span
+                                                v-for="dep in chunk.dependencies"
+                                                :key="dep"
+                                                class="px-2 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded"
+                                            >
+                                                {{ dep }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <div v-if="chunk.exported_symbols.length > 0" class="flex items-start gap-2">
+                                        <span class="text-xs font-medium text-gray-600">Экспорты:</span>
+                                        <div class="flex flex-wrap gap-1">
+                                            <span
+                                                v-for="symbol in chunk.exported_symbols"
+                                                :key="symbol"
+                                                class="px-2 py-0.5 text-xs bg-green-100 text-green-800 rounded font-mono"
+                                            >
+                                                {{ symbol }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Code Content -->
+                            <div class="bg-gray-900">
+                                <pre class="p-4 overflow-x-auto"><code class="text-sm text-gray-100 font-mono whitespace-pre">{{ chunk.content }}</code></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Confirmation Modal -->
+        <div v-if="confirmModal.show" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" @click="confirmModal.show = false">
+            <div class="bg-white rounded-lg shadow-xl max-w-md w-full" @click.stop>
+                <div class="p-6">
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="text-3xl">⚠️</div>
+                        <h3 class="text-xl font-bold text-gray-800">{{ confirmModal.title }}</h3>
+                    </div>
+                    <p class="text-gray-600 mb-6">{{ confirmModal.message }}</p>
+                    <div class="flex gap-3 justify-end">
+                        <button
+                            @click="confirmModal.show = false"
+                            class="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition"
+                        >
+                            Отмена
+                        </button>
+                        <button
+                            @click="confirmModal.onConfirm"
+                            class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+                        >
+                            {{ confirmModal.confirmText }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Notification Toast -->
+        <div v-if="notification.show" class="fixed top-4 right-4 z-50 animate-fade-in">
+            <div
+                :class="notification.type === 'success' ? 'bg-green-600' : notification.type === 'error' ? 'bg-red-600' : 'bg-blue-600'"
+                class="text-white px-6 py-4 rounded-lg shadow-lg max-w-md"
+            >
+                <div class="flex items-center gap-3">
+                    <span class="text-2xl">
+                        {{ notification.type === 'success' ? '✅' : notification.type === 'error' ? '❌' : 'ℹ️' }}
+                    </span>
+                    <div class="flex-1">
+                        <div class="font-semibold">{{ notification.title }}</div>
+                        <div v-if="notification.message" class="text-sm opacity-90 mt-1">{{ notification.message }}</div>
+                    </div>
+                    <button @click="notification.show = false" class="text-white opacity-75 hover:opacity-100">×</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="bg-white border-t mt-12">
+            <div class="container mx-auto px-4 py-6">
+                <div class="flex justify-between items-center">
+                    <p class="text-gray-600">Project Indexer Admin v1.0.0</p>
+                    <div class="flex gap-4 text-sm text-gray-600">
+                        <a href="/api/health" target="_blank" class="hover:text-blue-600">API Health</a>
+                        <a href="/api/projects" target="_blank" class="hover:text-blue-600">API Projects</a>
+                    </div>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    projects: [],
+                    loading: true,
+                    serverStatus: '🟢',
+                    totalProjects: 0,
+                    totalFiles: 0,
+                    selectedProject: null,
+                    currentTab: 'info',
+                    projectFiles: [],
+                    loadingFiles: false,
+                    fileSearchQuery: '',
+                    selectedFile: null,
+                    fileChunks: [],
+                    loadingFileContent: false,
+                    confirmModal: {
+                        show: false,
+                        title: '',
+                        message: '',
+                        confirmText: 'Подтвердить',
+                        onConfirm: null
+                    },
+                    notification: {
+                        show: false,
+                        type: 'info', // success, error, info
+                        title: '',
+                        message: ''
+                    }
+                };
+            },
+            computed: {
+                filteredFiles() {
+                    if (!this.fileSearchQuery) return this.projectFiles;
+
+                    const query = this.fileSearchQuery.toLowerCase();
+                    return this.projectFiles.filter(file =>
+                        file.relative_path.toLowerCase().includes(query)
+                    );
+                }
+            },
+            watch: {
+                currentTab(newTab) {
+                    if (newTab === 'files' && this.projectFiles.length === 0 && this.selectedProject) {
+                        this.loadProjectFiles();
+                    }
+                }
+            },
+            mounted() {
+                this.loadProjects();
+            },
+            methods: {
+                async loadProjects() {
+                    this.loading = true;
+                    try {
+                        const response = await fetch('/api/projects');
+                        const data = await response.json();
+
+                        this.projects = data.projects;
+                        this.totalProjects = data.total;
+                        this.totalFiles = data.projects.reduce((sum, p) => sum + p.total_files, 0);
+                        this.serverStatus = '🟢';
+                    } catch (error) {
+                        console.error('Failed to load projects:', error);
+                        this.serverStatus = '🔴';
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                selectProject(project) {
+                    this.selectedProject = project;
+                    this.currentTab = 'info';
+                    this.projectFiles = [];
+                    this.fileSearchQuery = '';
+                },
+                async loadProjectFiles() {
+                    if (!this.selectedProject) return;
+
+                    this.loadingFiles = true;
+                    try {
+                        const encodedPath = encodeURIComponent(this.selectedProject.project_path);
+                        const response = await fetch(`/api/projects/${encodedPath}/files?limit=1000`);
+                        const data = await response.json();
+
+                        this.projectFiles = data.files || [];
+                    } catch (error) {
+                        console.error('Failed to load files:', error);
+                        this.projectFiles = [];
+                    } finally {
+                        this.loadingFiles = false;
+                    }
+                },
+                async viewFileContent(file) {
+                    this.selectedFile = {
+                        file_path: file.relative_path,
+                        language: file.language,
+                        file_type: file.file_type,
+                        total_chunks: file.chunks
+                    };
+                    this.loadingFileContent = true;
+                    this.fileChunks = [];
+
+                    try {
+                        const encodedProjectPath = encodeURIComponent(this.selectedProject.project_path);
+                        const encodedFilePath = encodeURIComponent(file.relative_path);
+                        const response = await fetch(`/api/projects/${encodedProjectPath}/files/${encodedFilePath}`);
+                        const data = await response.json();
+
+                        if (data.status === 'success') {
+                            this.fileChunks = data.chunks;
+                        } else {
+                            console.error('Failed to load file content:', data);
+                        }
+                    } catch (error) {
+                        console.error('Failed to load file content:', error);
+                    } finally {
+                        this.loadingFileContent = false;
+                    }
+                },
+                async copyToClipboard(text) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        this.showNotification('success', 'Скопировано', 'Код скопирован в буфер обмена');
+                    } catch (error) {
+                        console.error('Failed to copy:', error);
+                        this.showNotification('error', 'Ошибка', 'Не удалось скопировать');
+                    }
+                },
+                confirmDeleteProject() {
+                    this.confirmModal = {
+                        show: true,
+                        title: 'Удалить проект?',
+                        message: `Вы уверены что хотите удалить проект "${this.selectedProject.project_name}" из индекса? Все данные будут потеряны. Это действие необратимо.`,
+                        confirmText: 'Удалить',
+                        onConfirm: () => this.deleteProject()
+                    };
+                },
+                async deleteProject() {
+                    this.confirmModal.show = false;
+
+                    const projectPath = this.selectedProject.project_path;
+                    const projectName = this.selectedProject.project_name;
+
+                    try {
+                        const encodedPath = encodeURIComponent(projectPath);
+                        const response = await fetch(`/api/projects/${encodedPath}`, {
+                            method: 'DELETE'
+                        });
+                        const data = await response.json();
+
+                        if (data.status === 'success') {
+                            this.showNotification('success', 'Проект удален', `"${projectName}" удален из индекса`);
+                            this.selectedProject = null;
+                            // Обновить список проектов
+                            await this.loadProjects();
+                        } else {
+                            this.showNotification('error', 'Ошибка удаления', data.error || 'Неизвестная ошибка');
+                        }
+                    } catch (error) {
+                        console.error('Failed to delete project:', error);
+                        this.showNotification('error', 'Ошибка удаления', error.message);
+                    }
+                },
+                async updateFileIndex(file) {
+                    // Set updating flag
+                    file.updating = true;
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.selectedProject.project_path);
+                        const response = await fetch(`/api/projects/${encodedPath}/files/update`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                file_paths: [file.relative_path]
+                            })
+                        });
+                        const data = await response.json();
+
+                        if (data.status === 'success' || data.status === 'partial') {
+                            const stats = data.stats;
+                            if (stats.updated_files > 0) {
+                                this.showNotification(
+                                    'success',
+                                    'Индекс обновлен',
+                                    `Файл обновлен: ${stats.total_chunks} чанков`
+                                );
+                                // Перезагрузить список файлов
+                                await this.loadProjectFiles();
+                            } else if (stats.failed_files > 0) {
+                                this.showNotification('error', 'Ошибка обновления', data.errors?.[0]?.error || 'Не удалось обновить файл');
+                            }
+                        } else {
+                            this.showNotification('error', 'Ошибка обновления', data.error || 'Неизвестная ошибка');
+                        }
+                    } catch (error) {
+                        console.error('Failed to update file:', error);
+                        this.showNotification('error', 'Ошибка обновления', error.message);
+                    } finally {
+                        file.updating = false;
+                    }
+                },
+                showNotification(type, title, message = '') {
+                    this.notification = {
+                        show: true,
+                        type,
+                        title,
+                        message
+                    };
+
+                    // Auto-hide after 5 seconds
+                    setTimeout(() => {
+                        this.notification.show = false;
+                    }, 5000);
+                },
+                getFileTypeColor(fileType) {
+                    const colors = {
+                        'code': 'bg-purple-100 text-purple-700',
+                        'documentation': 'bg-blue-100 text-blue-700',
+                        'config': 'bg-yellow-100 text-yellow-700',
+                        'test': 'bg-green-100 text-green-700',
+                        'unknown': 'bg-gray-100 text-gray-700'
+                    };
+                    return colors[fileType] || colors['unknown'];
+                },
+                formatDate(timestamp) {
+                    if (!timestamp) return 'Неизвестно';
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleDateString('ru-RU', {
+                        year: 'numeric',
+                        month: 'long',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

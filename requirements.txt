@@ -4,9 +4,9 @@
 # Core MCP
 mcp>=1.0.0
 
-# Vector DB - use chromadb-client for lighter install without ML dependencies
-# или chromadb>=0.5.0 если нужна полная версия
-chromadb-client>=0.5.0
+# Vector DB - full version with persistent storage support
+# Note: chromadb-client is HTTP-only and doesn't support PersistentClient
+chromadb>=0.5.0
 
 # OpenAI
 openai>=1.0.0
@@ -20,3 +20,7 @@ pyyaml>=6.0
 
 # Data validation (flexible version)
 pydantic>=1.9,<3.0
+
+# Web server (for admin portal)
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0

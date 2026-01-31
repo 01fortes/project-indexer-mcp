@@ -1,11 +1,10 @@
-"""Code analysis using OpenAI with project context."""
+"""Code analysis using LLM with project context."""
 
 import json
 from pathlib import Path
 from typing import Optional
 
-from openai import AsyncOpenAI
-
+from ..providers.base import LLMProvider, ChatMessage
 from ..storage.models import CodeAnalysis, FunctionInfo, ProjectContext
 from ..utils.logger import get_logger
 
@@ -18,10 +17,10 @@ async def analyze_code(
     language: str,
     file_type: str,
     project_context: Optional[ProjectContext],
-    client: AsyncOpenAI
+    llm_provider: LLMProvider
 ) -> CodeAnalysis:
     """
-    Analyze code file using OpenAI with project context.
+    Analyze code file using LLM with project context.
 
     Args:
         code: Code content.
@@ -29,7 +28,7 @@ async def analyze_code(
         language: Programming language.
         file_type: File type (code|documentation|config|test).
         project_context: Project context for better analysis.
-        client: OpenAI async client.
+        llm_provider: LLM provider for analysis.
 
     Returns:
         CodeAnalysis object.
@@ -44,27 +43,54 @@ async def analyze_code(
     else:
         prompt = _build_code_analysis_prompt(code, file_path, language, project_context)
 
-    try:
-        # Using Responses API with gpt-5.2-codex for better code analysis
-        response = await client.responses.create(
-            model="gpt-5.2-codex",
-            input=prompt,
-            instructions="You are a code analysis expert. Analyze code and provide structured JSON output.",
-            text={
-                "format": {"type": "json_object"}
+    # Define JSON schema for response
+    schema = {
+        "name": "code_analysis",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "purpose": {"type": "string"},
+                "dependencies": {"type": "array", "items": {"type": "string"}},
+                "exported_symbols": {"type": "array", "items": {"type": "string"}},
+                "key_functions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "parameters": {"type": "array", "items": {"type": "string"}},
+                            "return_type": {"type": "string"}
+                        },
+                        "required": ["name", "description", "parameters", "return_type"],
+                        "additionalProperties": False
+                    }
+                },
+                "architectural_notes": {"type": "string"}
             },
-            reasoning={
-                "effort": "medium"  # Balanced reasoning for code analysis
-            }
+            "required": ["purpose", "dependencies", "exported_symbols", "key_functions", "architectural_notes"],
+            "additionalProperties": False
+        }
+    }
+
+    try:
+        response = await llm_provider.chat_completion(
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content="You are a code analysis expert. Analyze code and provide structured JSON output."
+                ),
+                ChatMessage(
+                    role="user",
+                    content=prompt
+                )
+            ],
+            response_format={"type": "json_schema", "json_schema": schema}
         )
 
-        # Parse response - handle both string and dict
-        output_text = response.output_text
-
-        if isinstance(output_text, str):
-            result = json.loads(output_text)
-        else:
-            result = output_text
+        # Parse response
+        result = json.loads(response.content)
 
         # Validate that result is a dict
         if not isinstance(result, dict):
@@ -94,7 +120,7 @@ async def analyze_code(
         return analysis
 
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON from {file_path}: {e}. Response: {response.output_text[:200]}")
+        logger.error(f"Failed to parse JSON from {file_path}: {e}. Response: {response.content[:200]}")
     except Exception as e:
         logger.error(f"Failed to analyze {file_path}: {e}")
         # Return minimal analysis

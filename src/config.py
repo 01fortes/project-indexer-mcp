@@ -51,6 +51,27 @@ class ServerConfig:
 
 
 @dataclass
+class ProviderConfig:
+    """Provider configuration."""
+    # LLM Provider
+    llm_provider: str = "openai"  # "openai", "local", "anthropic"
+    llm_model: str = "gpt-5.2-codex"
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None  # Для локальных моделей
+    reasoning_effort: str = "medium"  # "low", "medium", "high" (для reasoning моделей)
+
+    # Embedding Provider
+    embedding_provider: str = "openai"  # "openai", "local"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: Optional[str] = None
+    embedding_base_url: Optional[str] = None
+
+    # Common settings
+    max_retries: int = 3
+    timeout: int = 60
+
+
+@dataclass
 class FilePatterns:
     """File patterns for scanning."""
 
@@ -78,11 +99,12 @@ class FilePatterns:
 class Config:
     """Main configuration container."""
 
-    openai: OpenAIConfig
+    openai: OpenAIConfig  # DEPRECATED - kept for backward compatibility
     chroma: ChromaConfig
     indexing: IndexingConfig
     server: ServerConfig
     patterns: FilePatterns
+    provider: ProviderConfig
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -143,6 +165,23 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         version=os.getenv("SERVER_VERSION", "1.0.0"),
     )
 
+    # Provider configuration (NEW!)
+    provider_config = ProviderConfig(
+        llm_provider=os.getenv("LLM_PROVIDER", "openai"),
+        llm_model=os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.2-codex")),
+        llm_api_key=os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY")),
+        llm_base_url=os.getenv("LLM_BASE_URL"),
+        reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "medium"),
+
+        embedding_provider=os.getenv("EMBEDDING_PROVIDER", "openai"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")),
+        embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("OPENAI_API_KEY")),
+        embedding_base_url=os.getenv("EMBEDDING_BASE_URL"),
+
+        max_retries=int(os.getenv("PROVIDER_MAX_RETRIES", "3")),
+        timeout=int(os.getenv("PROVIDER_TIMEOUT", "60"))
+    )
+
     # Load file patterns from YAML if exists
     patterns = FilePatterns()
     if config_path is None:
@@ -165,4 +204,5 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         indexing=indexing_config,
         server=server_config,
         patterns=patterns,
+        provider=provider_config,
     )

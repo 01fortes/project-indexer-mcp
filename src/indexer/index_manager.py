@@ -6,14 +6,13 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from openai import AsyncOpenAI
-
 from ..config import Config
 from ..indexer.analyzer import analyze_code
 from ..indexer.chunker import chunk_code_file
 from ..indexer.context_analyzer import analyze_project_context
 from ..indexer.embedder import batch_generate_embeddings, prepare_embedding_text
 from ..indexer.scanner import scan_project
+from ..providers.base import LLMProvider, EmbeddingProvider
 from ..storage.chroma_client import ChromaManager
 from ..storage.models import IndexedDocument, ProjectContext
 from ..utils.logger import get_logger
@@ -29,7 +28,8 @@ class IndexManager:
         self,
         config: Config,
         chroma: ChromaManager,
-        openai_client: AsyncOpenAI,
+        llm_provider: LLMProvider,
+        embedding_provider: EmbeddingProvider,
         rate_limiter: RateLimiter
     ):
         """
@@ -38,13 +38,18 @@ class IndexManager:
         Args:
             config: Configuration object.
             chroma: ChromaDB manager.
-            openai_client: OpenAI async client.
+            llm_provider: LLM provider for code analysis.
+            embedding_provider: Embedding provider for vector generation.
             rate_limiter: Rate limiter for API calls.
         """
         self.config = config
         self.chroma = chroma
-        self.openai_client = openai_client
+        self.llm_provider = llm_provider
+        self.embedding_provider = embedding_provider
         self.rate_limiter = rate_limiter
+
+        # DEPRECATED - kept for backward compatibility if needed
+        self.openai_client = None
 
     async def index_project(
         self,
@@ -89,7 +94,7 @@ class IndexManager:
             logger.info("Step 1: Analyzing project context")
 
             project_context = await self.rate_limiter.execute_with_retry(
-                lambda: analyze_project_context(project_path, self.openai_client)
+                lambda: analyze_project_context(project_path, self.llm_provider)
             )
 
             stats["context_analysis_seconds"] = time.time() - context_start
@@ -220,7 +225,7 @@ class IndexManager:
         for i, chunk in enumerate(chunks, 1):
             chunk_info = f" [{i}/{len(chunks)}]" if len(chunks) > 1 else ""
 
-            # Analyze with OpenAI (with rate limiting)
+            # Analyze with LLM provider (with rate limiting)
             await self.rate_limiter.acquire(tokens=1000, request_count=1)
 
             analysis = await self.rate_limiter.execute_with_retry(
@@ -230,7 +235,7 @@ class IndexManager:
                     file_meta.language,
                     file_meta.file_type,
                     project_context,
-                    self.openai_client
+                    self.llm_provider
                 )
             )
 
@@ -247,16 +252,11 @@ class IndexManager:
             # Generate embedding (with rate limiting)
             await self.rate_limiter.acquire(tokens=500, request_count=1)
 
-            embedding = await self.rate_limiter.execute_with_retry(
-                lambda: self.openai_client.embeddings.create(
-                    input=embedding_text,
-                    model=self.config.openai.embedding_model
-                )
+            embedding_vector = await self.rate_limiter.execute_with_retry(
+                lambda: self.embedding_provider.create_embedding(embedding_text)
             )
 
             logger.info(f"  ✓ Embedded{chunk_info}")
-
-            embedding_vector = embedding.data[0].embedding
 
             # Create indexed document
             doc_id = self.chroma.generate_document_id(
@@ -320,12 +320,7 @@ Purpose: {context.purpose}
 
         await self.rate_limiter.acquire(tokens=200, request_count=1)
 
-        embedding_response = await self.openai_client.embeddings.create(
-            input=context_text,
-            model=self.config.openai.embedding_model
-        )
-
-        embedding = embedding_response.data[0].embedding
+        embedding = await self.embedding_provider.create_embedding(context_text)
 
         # Create document ID
         doc_id = self.chroma.generate_document_id(project_path, Path("__project_context__"), 0)
@@ -610,3 +605,175 @@ Purpose: {context.purpose}
                 logger.warning(f"Skipping file outside project: {file_meta.file_path}")
 
         return relative_paths
+
+    async def generate_query_embedding(self, query: str) -> List[float]:
+        """
+        Генерация embedding для поискового запроса с rate limiting.
+
+        Args:
+            query: Текст запроса
+
+        Returns:
+            Список float - embedding вектор
+        """
+        await self.rate_limiter.acquire(tokens=500, request_count=1)
+
+        embedding = await self.rate_limiter.execute_with_retry(
+            lambda: self.embedding_provider.create_embedding(query)
+        )
+
+        return embedding
+
+    async def search_code(
+        self,
+        project_path: Path,
+        query: str,
+        n_results: int = 5,
+        file_type: Optional[str] = None,
+        language: Optional[str] = None,
+        include_code: bool = True
+    ) -> Dict:
+        """
+        Высокоуровневый API семантического поиска.
+
+        Args:
+            project_path: Path to project root
+            query: Search query
+            n_results: Number of results to return
+            file_type: Optional file type filter (code|documentation|config|test)
+            language: Optional language filter
+            include_code: Whether to include code content in results
+
+        Returns:
+            Dictionary with search results
+        """
+        try:
+            # Get collection
+            collection = self.chroma.get_or_create_collection(project_path)
+
+            # Generate embedding
+            query_embedding = await self.generate_query_embedding(query)
+
+            # Build metadata filters
+            where_filter = {}
+            if file_type:
+                where_filter["file_type"] = file_type
+            if language:
+                where_filter["language"] = language
+
+            # Search
+            results = await self.chroma.search(
+                collection=collection,
+                query_embedding=query_embedding,
+                n_results=n_results,
+                where_filter=where_filter if where_filter else None,
+                include_content=include_code
+            )
+
+            # Format results
+            formatted_results = []
+            for result in results:
+                formatted_result = {
+                    "relative_path": result["metadata"].get("relative_path"),
+                    "chunk_index": result["metadata"].get("chunk_index"),
+                    "total_chunks": result["metadata"].get("total_chunks"),
+                    "language": result["metadata"].get("language"),
+                    "file_type": result["metadata"].get("file_type"),
+                    "purpose": result["metadata"].get("purpose"),
+                    "score": result["distance"]
+                }
+
+                if include_code:
+                    formatted_result["code"] = result["content"]
+
+                formatted_results.append(formatted_result)
+
+            return {
+                "status": "success",
+                "results": formatted_results,
+                "query": query
+            }
+
+        except Exception as e:
+            logger.error(f"Search code failed: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "query": query
+            }
+
+    async def search_files(
+        self,
+        project_path: Path,
+        query: str,
+        n_results: int = 10
+    ) -> Dict:
+        """
+        Поиск файлов с дедупликацией.
+
+        Args:
+            project_path: Path to project root
+            query: Search query
+            n_results: Number of unique files to return
+
+        Returns:
+            Dictionary with file search results
+        """
+        try:
+            # Get collection
+            collection = self.chroma.get_or_create_collection(project_path)
+
+            # Generate embedding
+            query_embedding = await self.generate_query_embedding(query)
+
+            # Search with extra results for deduplication
+            results = await self.chroma.search(
+                collection=collection,
+                query_embedding=query_embedding,
+                n_results=n_results * 3,  # Get more to account for duplicates
+                include_content=False
+            )
+
+            # Deduplicate by relative_path, keep best score
+            files_dict = {}
+            for result in results:
+                rel_path = result["metadata"].get("relative_path")
+                if rel_path and rel_path != "__project_context__":
+                    if rel_path not in files_dict or result["distance"] < files_dict[rel_path]["score"]:
+                        files_dict[rel_path] = {
+                            "relative_path": rel_path,
+                            "language": result["metadata"].get("language"),
+                            "file_type": result["metadata"].get("file_type"),
+                            "purpose": result["metadata"].get("purpose"),
+                            "score": result["distance"]
+                        }
+
+            # Sort by score and limit
+            files_list = sorted(files_dict.values(), key=lambda x: x["score"])[:n_results]
+
+            return {
+                "status": "success",
+                "query": query,
+                "total_files": len(files_list),
+                "files": files_list
+            }
+
+        except Exception as e:
+            logger.error(f"Search files failed: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "query": query
+            }
+
+    async def get_project_context(self, project_path: Path) -> Optional[Dict]:
+        """
+        Получение метаданных контекста проекта.
+
+        Args:
+            project_path: Path to project root
+
+        Returns:
+            Dictionary with project context or None if not found
+        """
+        return await self.chroma.get_project_context_metadata(project_path)

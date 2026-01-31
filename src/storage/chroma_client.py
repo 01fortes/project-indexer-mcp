@@ -356,3 +356,50 @@ class ChromaManager:
         except Exception as e:
             logger.error(f"Failed to list projects: {e}")
             return []
+
+    async def get_project_context_metadata(self, project_path: Path) -> Optional[Dict]:
+        """
+        Получить метаданные контекста проекта без знания внутреннего формата ID.
+        Инкапсулирует знание о специальном документе "__project_context__".
+
+        Args:
+            project_path: Path to project root
+
+        Returns:
+            Dictionary with project context metadata or None if not found
+        """
+        try:
+            collection = self.get_or_create_collection(project_path)
+
+            # Сгенерировать специальный ID контекста
+            context_id = self.generate_document_id(
+                project_path,
+                Path("__project_context__"),
+                0
+            )
+
+            # Получить документ
+            result = collection.get(ids=[context_id], include=["metadatas"])
+
+            if result and result["metadatas"] and len(result["metadatas"]) > 0:
+                metadata = result["metadatas"][0]
+
+                # Парсинг полей-списков из строк (comma-separated → list)
+                return {
+                    "project_name": metadata.get("project_name"),
+                    "project_description": metadata.get("project_description"),
+                    "tech_stack": metadata.get("tech_stack", "").split(", ") if metadata.get("tech_stack") else [],
+                    "frameworks": metadata.get("frameworks", "").split(", ") if metadata.get("frameworks") else [],
+                    "architecture_type": metadata.get("architecture_type"),
+                    "purpose": metadata.get("purpose"),
+                    "indexed_at": metadata.get("indexed_at"),
+                    "project_structure": metadata.get("project_structure"),
+                    "key_entry_points": metadata.get("key_entry_points", "").split(", ") if metadata.get("key_entry_points") else [],
+                    "build_system": metadata.get("build_system")
+                }
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Could not retrieve project context for {project_path}: {e}")
+            return None
