@@ -10,17 +10,6 @@ from dotenv import load_dotenv
 
 
 @dataclass
-class OpenAIConfig:
-    """OpenAI API configuration."""
-
-    api_key: str
-    model: str = "gpt-4o-mini"
-    embedding_model: str = "text-embedding-3-small"
-    max_retries: int = 3
-    timeout: int = 60
-
-
-@dataclass
 class ChromaConfig:
     """ChromaDB configuration."""
 
@@ -99,7 +88,6 @@ class FilePatterns:
 class Config:
     """Main configuration container."""
 
-    openai: OpenAIConfig  # DEPRECATED - kept for backward compatibility
     chroma: ChromaConfig
     indexing: IndexingConfig
     server: ServerConfig
@@ -122,22 +110,6 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     """
     # Load environment variables
     load_dotenv()
-
-    # OpenAI configuration (required)
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable is required. "
-            "Set it in .env file or export it."
-        )
-
-    openai_config = OpenAIConfig(
-        api_key=api_key,
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
-        max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "3")),
-        timeout=int(os.getenv("OPENAI_TIMEOUT", "60")),
-    )
 
     # ChromaDB configuration
     chroma_host = os.getenv("CHROMA_HOST")
@@ -199,7 +171,6 @@ def load_config(config_path: Optional[Path] = None) -> Config:
                     patterns.binary_extensions = yaml_config["binary_extensions"]
 
     return Config(
-        openai=openai_config,
         chroma=chroma_config,
         indexing=indexing_config,
         server=server_config,

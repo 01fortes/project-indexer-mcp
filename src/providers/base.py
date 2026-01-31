@@ -34,7 +34,8 @@ class LLMProvider(ABC):
     async def chat_completion(
         self,
         messages: List[ChatMessage],
-        response_format: Optional[Dict[str, Any]] = None
+        response_format: Optional[Dict[str, Any]] = None,
+        use_reasoning: Optional[bool] = None
     ) -> LLMResponse:
         """
         Выполнить chat completion запрос.
@@ -42,6 +43,9 @@ class LLMProvider(ABC):
         Args:
             messages: Список сообщений чата
             response_format: Опциональный формат ответа (JSON schema)
+            use_reasoning: Использовать ли reasoning (для Responses API)
+                          None/False - без reasoning (быстрее, для файлов)
+                          True - с reasoning (медленнее, для проекта)
 
         Returns:
             LLMResponse с текстом ответа

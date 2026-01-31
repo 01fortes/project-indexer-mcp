@@ -113,7 +113,8 @@ async def analyze_project_context(
                     content=prompt
                 )
             ],
-            response_format={"type": "json_schema", "json_schema": schema}
+            response_format={"type": "json_schema", "json_schema": schema},
+            use_reasoning=True  # Для анализа проекта используем reasoning
         )
 
         # Parse response

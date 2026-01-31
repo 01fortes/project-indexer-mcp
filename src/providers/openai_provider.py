@@ -37,7 +37,8 @@ class OpenAILLMProvider(LLMProvider):
     async def chat_completion(
         self,
         messages: List[ChatMessage],
-        response_format: Optional[Dict[str, Any]] = None
+        response_format: Optional[Dict[str, Any]] = None,
+        use_reasoning: Optional[bool] = None
     ) -> LLMResponse:
         """Выполнить OpenAI responses API call."""
 
@@ -55,11 +56,16 @@ class OpenAILLMProvider(LLMProvider):
             "instructions": instructions,
             "text": {
                 "format": {"type": "json_object"}
-            },
-            "reasoning": {
-                "effort": self._reasoning_effort
             }
         }
+
+        # Добавить reasoning только если явно запрошено
+        # По умолчанию reasoning ВЫКЛЮЧЕН (для файлов - быстрее и дешевле)
+        # Для анализа проекта - передать use_reasoning=True
+        if use_reasoning is True:
+            params["reasoning"] = {
+                "effort": self._reasoning_effort
+            }
 
         # Вызов Responses API
         response = await self._client.responses.create(**params)
