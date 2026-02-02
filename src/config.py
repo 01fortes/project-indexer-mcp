@@ -41,16 +41,21 @@ class ServerConfig:
 
 @dataclass
 class ProviderConfig:
-    """Provider configuration."""
+    """Provider configuration.
+
+    Supported providers:
+    - LLM: "openai", "huggingface", "anthropic", "local"
+    - Embedding: "openai", "huggingface", "local"
+    """
     # LLM Provider
-    llm_provider: str = "openai"  # "openai", "local", "anthropic"
+    llm_provider: str = "openai"  # "openai", "huggingface", "anthropic", "local"
     llm_model: str = "gpt-5.2-codex"
     llm_api_key: Optional[str] = None
-    llm_base_url: Optional[str] = None  # Для локальных моделей
+    llm_base_url: Optional[str] = None  # Для локальных моделей или custom endpoint
     reasoning_effort: str = "medium"  # "low", "medium", "high" (для reasoning моделей)
 
     # Embedding Provider
-    embedding_provider: str = "openai"  # "openai", "local"
+    embedding_provider: str = "openai"  # "openai", "huggingface", "local"
     embedding_model: str = "text-embedding-3-small"
     embedding_api_key: Optional[str] = None
     embedding_base_url: Optional[str] = None
@@ -137,17 +142,62 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         version=os.getenv("SERVER_VERSION", "1.0.0"),
     )
 
-    # Provider configuration (NEW!)
+    # Provider configuration
+    llm_provider = os.getenv("LLM_PROVIDER", "openai")
+
+    # Get LLM API key with fallback chain:
+    # 1. LLM_API_KEY (универсальный)
+    # 2. Provider-specific key (OPENAI_API_KEY, HUGGINGFACE_TOKEN, etc.)
+    llm_api_key = os.getenv("LLM_API_KEY")
+    if not llm_api_key:
+        if llm_provider == "openai":
+            llm_api_key = os.getenv("OPENAI_API_KEY")
+        elif llm_provider == "huggingface":
+            llm_api_key = os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_TOKEN")
+
+    # Get LLM model with defaults per provider
+    llm_model = os.getenv("LLM_MODEL")
+    if not llm_model:
+        if llm_provider == "huggingface":
+            llm_model = "meta-llama/Llama-3.1-70B-Instruct"
+        else:
+            llm_model = "gpt-5.2-codex"
+
+    # Determine Embedding provider
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "openai")
+
+    # Get Embedding API key with fallback chain:
+    # 1. EMBEDDING_API_KEY (универсальный)
+    # 2. LLM_API_KEY (если тот же провайдер)
+    # 3. Provider-specific key
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY")
+    if not embedding_api_key:
+        # Если embedding провайдер совпадает с LLM, используем тот же ключ
+        if embedding_provider == llm_provider and llm_api_key:
+            embedding_api_key = llm_api_key
+        elif embedding_provider == "openai":
+            embedding_api_key = os.getenv("OPENAI_API_KEY")
+        elif embedding_provider == "huggingface":
+            embedding_api_key = os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_TOKEN")
+
+    # Get Embedding model with defaults per provider
+    embedding_model = os.getenv("EMBEDDING_MODEL")
+    if not embedding_model:
+        if embedding_provider == "huggingface":
+            embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+        else:
+            embedding_model = "text-embedding-3-small"
+
     provider_config = ProviderConfig(
-        llm_provider=os.getenv("LLM_PROVIDER", "openai"),
-        llm_model=os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.2-codex")),
-        llm_api_key=os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY")),
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_api_key=llm_api_key,
         llm_base_url=os.getenv("LLM_BASE_URL"),
         reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "medium"),
 
-        embedding_provider=os.getenv("EMBEDDING_PROVIDER", "openai"),
-        embedding_model=os.getenv("EMBEDDING_MODEL", os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")),
-        embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("OPENAI_API_KEY")),
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_api_key=embedding_api_key,
         embedding_base_url=os.getenv("EMBEDDING_BASE_URL"),
 
         max_retries=int(os.getenv("PROVIDER_MAX_RETRIES", "3")),

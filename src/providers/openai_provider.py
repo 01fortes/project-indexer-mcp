@@ -175,37 +175,5 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return self._dimensions.get(self._model, 1536)
 
 
-def create_providers_from_config(config) -> tuple[LLMProvider, EmbeddingProvider]:
-    """
-    Фабричная функция для создания провайдеров из конфигурации.
-
-    Args:
-        config: Config объект с настройками
-
-    Returns:
-        Tuple (llm_provider, embedding_provider)
-    """
-    # Создать LLM провайдер
-    if config.provider.llm_provider == "openai":
-        llm_provider = OpenAILLMProvider(
-            api_key=config.provider.llm_api_key,
-            model=config.provider.llm_model,
-            reasoning_effort=config.provider.reasoning_effort,
-            max_retries=config.provider.max_retries,
-            timeout=config.provider.timeout
-        )
-    else:
-        raise ValueError(f"Unsupported LLM provider: {config.provider.llm_provider}")
-
-    # Создать Embedding провайдер
-    if config.provider.embedding_provider == "openai":
-        embedding_provider = OpenAIEmbeddingProvider(
-            api_key=config.provider.embedding_api_key,
-            model=config.provider.embedding_model,
-            max_retries=config.provider.max_retries,
-            timeout=config.provider.timeout
-        )
-    else:
-        raise ValueError(f"Unsupported embedding provider: {config.provider.embedding_provider}")
-
-    return llm_provider, embedding_provider
+# Factory function moved to factory.py for better separation of concerns
+# Import it from there: from .factory import create_providers_from_config

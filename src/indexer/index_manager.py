@@ -655,36 +655,35 @@ Purpose: {context.purpose}
             query_embedding = await self.generate_query_embedding(query)
 
             # Build metadata filters
-            where_filter = {}
+            metadata_filter = {}
             if file_type:
-                where_filter["file_type"] = file_type
+                metadata_filter["file_type"] = file_type
             if language:
-                where_filter["language"] = language
+                metadata_filter["language"] = language
 
             # Search
             results = await self.chroma.search(
                 collection=collection,
                 query_embedding=query_embedding,
                 n_results=n_results,
-                where_filter=where_filter if where_filter else None,
-                include_content=include_code
+                metadata_filter=metadata_filter if metadata_filter else None
             )
 
             # Format results
             formatted_results = []
             for result in results:
                 formatted_result = {
-                    "relative_path": result["metadata"].get("relative_path"),
-                    "chunk_index": result["metadata"].get("chunk_index"),
-                    "total_chunks": result["metadata"].get("total_chunks"),
-                    "language": result["metadata"].get("language"),
-                    "file_type": result["metadata"].get("file_type"),
-                    "purpose": result["metadata"].get("purpose"),
-                    "score": result["distance"]
+                    "relative_path": result.relative_path,
+                    "chunk_index": result.chunk_index,
+                    "total_chunks": result.metadata.get("total_chunks"),
+                    "language": result.metadata.get("language"),
+                    "file_type": result.metadata.get("file_type"),
+                    "purpose": result.purpose,
+                    "score": result.score
                 }
 
                 if include_code:
-                    formatted_result["code"] = result["content"]
+                    formatted_result["code"] = result.code
 
                 formatted_results.append(formatted_result)
 
@@ -730,22 +729,21 @@ Purpose: {context.purpose}
             results = await self.chroma.search(
                 collection=collection,
                 query_embedding=query_embedding,
-                n_results=n_results * 3,  # Get more to account for duplicates
-                include_content=False
+                n_results=n_results * 3  # Get more to account for duplicates
             )
 
             # Deduplicate by relative_path, keep best score
             files_dict = {}
             for result in results:
-                rel_path = result["metadata"].get("relative_path")
+                rel_path = result.relative_path
                 if rel_path and rel_path != "__project_context__":
-                    if rel_path not in files_dict or result["distance"] < files_dict[rel_path]["score"]:
+                    if rel_path not in files_dict or result.score > files_dict[rel_path]["score"]:
                         files_dict[rel_path] = {
                             "relative_path": rel_path,
-                            "language": result["metadata"].get("language"),
-                            "file_type": result["metadata"].get("file_type"),
-                            "purpose": result["metadata"].get("purpose"),
-                            "score": result["distance"]
+                            "language": result.metadata.get("language"),
+                            "file_type": result.metadata.get("file_type"),
+                            "purpose": result.purpose,
+                            "score": result.score
                         }
 
             # Sort by score and limit

@@ -20,6 +20,12 @@
         .animate-fade-in {
             animation: fadeIn 0.3s ease-out;
         }
+        .line-clamp-2 {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -59,6 +65,87 @@
                 <div class="bg-white rounded-lg shadow p-6 border-l-4 border-purple-500">
                     <div class="text-gray-500 text-sm font-medium">API эндпоинты</div>
                     <div class="text-4xl font-bold text-purple-600 mt-2">6</div>
+                </div>
+            </div>
+
+            <!-- Global Search -->
+            <div v-if="projects.length > 0" class="bg-white rounded-lg shadow mb-6">
+                <div class="p-6">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-4">🔍 Semantic Search</h2>
+                    <div class="flex gap-3">
+                        <select
+                            v-model="searchProjectPath"
+                            class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                            <option value="">Все проекты</option>
+                            <option v-for="project in projects" :key="project.project_path" :value="project.project_path">
+                                {{ project.project_name }}
+                            </option>
+                        </select>
+                        <input
+                            v-model="globalSearchQuery"
+                            @keyup.enter="performGlobalSearch"
+                            type="text"
+                            placeholder="Поиск по коду и описаниям (например: NotificationSettings.kt)..."
+                            class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                        <button
+                            @click="performGlobalSearch"
+                            :disabled="!globalSearchQuery || globalSearching"
+                            class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <span v-if="globalSearching">⏳ Поиск...</span>
+                            <span v-else>Найти</span>
+                        </button>
+                    </div>
+
+                    <!-- Search Results -->
+                    <div v-if="searchResults.length > 0" class="mt-4 space-y-2">
+                        <div class="flex items-center justify-between mb-2">
+                            <p class="text-sm text-gray-600">
+                                Найдено: <span class="font-semibold">{{ searchResults.length }}</span> результатов
+                            </p>
+                            <button
+                                @click="clearSearch"
+                                class="text-sm text-gray-500 hover:text-gray-700"
+                            >
+                                ✕ Очистить
+                            </button>
+                        </div>
+                        <div
+                            v-for="result in searchResults"
+                            :key="result.relative_path"
+                            class="p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition cursor-pointer border border-gray-200"
+                            @click="openSearchResult(result)"
+                        >
+                            <div class="flex items-start justify-between">
+                                <div class="flex-1 min-w-0">
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-mono text-sm font-semibold text-gray-800 truncate">
+                                            {{ result.relative_path }}
+                                        </span>
+                                        <span class="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">
+                                            {{ result.language }}
+                                        </span>
+                                    </div>
+                                    <p class="text-xs text-gray-600 mt-1 line-clamp-2">{{ result.purpose || 'Нет описания' }}</p>
+                                </div>
+                                <div class="ml-4 text-right">
+                                    <div class="text-sm font-semibold text-green-600">
+                                        {{ (result.score * 100).toFixed(1) }}%
+                                    </div>
+                                    <div class="text-xs text-gray-500">similarity</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- No Results -->
+                    <div v-if="searchPerformed && searchResults.length === 0" class="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                        <p class="text-sm text-yellow-800">
+                            Ничего не найдено по запросу "<strong>{{ lastSearchQuery }}</strong>"
+                        </p>
+                    </div>
                 </div>
             </div>
 
@@ -488,6 +575,13 @@
                     selectedFile: null,
                     fileChunks: [],
                     loadingFileContent: false,
+                    // Global search
+                    globalSearchQuery: '',
+                    searchProjectPath: '',
+                    searchResults: [],
+                    globalSearching: false,
+                    searchPerformed: false,
+                    lastSearchQuery: '',
                     confirmModal: {
                         show: false,
                         title: '',
@@ -553,7 +647,7 @@
                     this.loadingFiles = true;
                     try {
                         const encodedPath = encodeURIComponent(this.selectedProject.project_path);
-                        const response = await fetch(`/api/projects/${encodedPath}/files?limit=1000`);
+                        const response = await fetch(`/api/projects/${encodedPath}/files?limit=10000`);
                         const data = await response.json();
 
                         this.projectFiles = data.files || [];
@@ -708,6 +802,102 @@
                         hour: '2-digit',
                         minute: '2-digit'
                     });
+                },
+                async performGlobalSearch() {
+                    if (!this.globalSearchQuery.trim()) return;
+
+                    this.globalSearching = true;
+                    this.searchPerformed = true;
+                    this.lastSearchQuery = this.globalSearchQuery;
+                    this.searchResults = [];
+
+                    try {
+                        // Search in specific project or all projects
+                        if (this.searchProjectPath) {
+                            // Search in specific project
+                            const results = await this.searchInProject(this.searchProjectPath, this.globalSearchQuery);
+                            this.searchResults = results;
+                        } else {
+                            // Search in all projects
+                            const allResults = [];
+                            for (const project of this.projects) {
+                                const results = await this.searchInProject(project.project_path, this.globalSearchQuery);
+                                allResults.push(...results);
+                            }
+                            // Sort by score descending
+                            allResults.sort((a, b) => b.score - a.score);
+                            this.searchResults = allResults.slice(0, 20); // Top 20 results
+                        }
+
+                        if (this.searchResults.length > 0) {
+                            this.showNotification('success', 'Найдено', `${this.searchResults.length} файлов`);
+                        } else {
+                            this.showNotification('info', 'Ничего не найдено', 'Попробуйте другой запрос');
+                        }
+                    } catch (error) {
+                        console.error('Search failed:', error);
+                        this.showNotification('error', 'Ошибка поиска', error.message);
+                    } finally {
+                        this.globalSearching = false;
+                    }
+                },
+                async searchInProject(projectPath, query) {
+                    try {
+                        const encodedPath = encodeURIComponent(projectPath);
+                        const response = await fetch(`/api/projects/${encodedPath}/search?query=${encodeURIComponent(query)}&n_results=10`);
+
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+
+                        const data = await response.json();
+
+                        if (data.status === 'success') {
+                            // Add project info to each result
+                            return data.results.map(result => ({
+                                ...result,
+                                project_path: projectPath,
+                                project_name: this.projects.find(p => p.project_path === projectPath)?.project_name || projectPath
+                            }));
+                        }
+                        return [];
+                    } catch (error) {
+                        console.error(`Search failed for project ${projectPath}:`, error);
+                        return [];
+                    }
+                },
+                clearSearch() {
+                    this.searchResults = [];
+                    this.globalSearchQuery = '';
+                    this.searchPerformed = false;
+                    this.lastSearchQuery = '';
+                },
+                async openSearchResult(result) {
+                    // Find and open the project
+                    const project = this.projects.find(p => p.project_path === result.project_path);
+                    if (!project) {
+                        this.showNotification('error', 'Ошибка', 'Проект не найден');
+                        return;
+                    }
+
+                    // Select the project
+                    this.selectProject(project);
+
+                    // Switch to files tab
+                    this.currentTab = 'files';
+
+                    // Load files if not loaded
+                    if (this.projectFiles.length === 0) {
+                        await this.loadProjectFiles();
+                    }
+
+                    // Find and open the file
+                    const file = this.projectFiles.find(f => f.relative_path === result.relative_path);
+                    if (file) {
+                        await this.viewFileContent(file);
+                    } else {
+                        this.showNotification('info', 'Файл не найден', 'Возможно, файл был удален');
+                    }
                 }
             }
         }).mount('#app');
