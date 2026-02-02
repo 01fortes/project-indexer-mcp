@@ -24,3 +24,8 @@ pydantic>=1.9,<3.0
 # Web server (for admin portal)
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+
+# AST parsing for call graph
+# Note: tree-sitter 0.22+ breaks compatibility with tree-sitter-languages 1.10.x
+tree-sitter>=0.21.0,<0.22
+tree-sitter-languages>=1.10.0

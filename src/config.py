@@ -90,6 +90,16 @@ class FilePatterns:
 
 
 @dataclass
+class CallGraphConfig:
+    """Call graph configuration."""
+
+    enabled: bool = True
+    db_path: str = "./call_graph.db"
+    max_call_depth: int = 10
+    resolve_cross_file: bool = True
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -98,6 +108,7 @@ class Config:
     server: ServerConfig
     patterns: FilePatterns
     provider: ProviderConfig
+    call_graph: CallGraphConfig
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -204,6 +215,14 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         timeout=int(os.getenv("PROVIDER_TIMEOUT", "60"))
     )
 
+    # Call graph configuration
+    call_graph_config = CallGraphConfig(
+        enabled=os.getenv("CALL_GRAPH_ENABLED", "true").lower() == "true",
+        db_path=os.getenv("CALL_GRAPH_DB_PATH", "./call_graph.db"),
+        max_call_depth=int(os.getenv("CALL_GRAPH_MAX_DEPTH", "10")),
+        resolve_cross_file=os.getenv("CALL_GRAPH_RESOLVE_CROSS_FILE", "true").lower() == "true"
+    )
+
     # Load file patterns from YAML if exists
     patterns = FilePatterns()
     if config_path is None:
@@ -226,4 +245,5 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         server=server_config,
         patterns=patterns,
         provider=provider_config,
+        call_graph=call_graph_config,
     )

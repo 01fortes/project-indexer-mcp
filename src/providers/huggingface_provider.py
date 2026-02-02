@@ -88,13 +88,45 @@ class HuggingFaceLLMProvider(LLMProvider):
 
         # Add JSON instruction if needed
         if response_format and response_format.get("type") == "json_schema":
-            json_instruction = "\n\nYou must respond with valid JSON only. No additional text."
+            # Get schema if available
+            schema_info = response_format.get("json_schema", {})
+            schema_name = schema_info.get("name", "response")
+            schema_def = schema_info.get("schema", {})
+
+            # Format schema for display
+            schema_text = json.dumps(schema_def, indent=2) if schema_def else "Not provided"
+
+            # Create detailed JSON instruction
+            json_instruction = f"""
+
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. You MUST respond with ONLY valid JSON. No markdown, no code blocks, no explanations, no reasoning.
+2. Do NOT wrap your response in ```json or ``` tags.
+3. Do NOT add any text before or after the JSON object.
+4. Start your response IMMEDIATELY with {{ and end with }}
+5. Ensure all JSON is properly formatted with correct quotes and commas.
+6. All string values must use double quotes ("), not single quotes (').
+
+REQUIRED JSON SCHEMA: {schema_name}
+{schema_text}
+
+Example of CORRECT response:
+{{"purpose": "example", "dependencies": ["dep1"], "exported_symbols": []}}
+
+Example of INCORRECT responses:
+❌ ```json {{"field": "value"}}```
+❌ Here is the JSON: {{"field": "value"}}
+❌ {{'field': 'value'}}  (single quotes)
+
+Your ENTIRE response must be pure JSON that can be directly parsed by json.loads().
+DO NOT include any reasoning, explanations, or additional text."""
+
             if openai_messages and openai_messages[0]["role"] == "system":
                 openai_messages[0]["content"] += json_instruction
             else:
                 openai_messages.insert(0, {
                     "role": "system",
-                    "content": f"You are a helpful assistant.{json_instruction}"
+                    "content": f"You are a code analysis expert.{json_instruction}"
                 })
 
         try:
@@ -103,27 +135,47 @@ class HuggingFaceLLMProvider(LLMProvider):
                 model=self._model,
                 messages=openai_messages,
                 temperature=0.1,  # Lower for code analysis
-                max_tokens=4000
+                max_tokens=4000,
+                stream=False  # Explicitly disable streaming
             )
 
             # Extract content
             content = response.choices[0].message.content
 
+            # Log raw response for debugging
+            if response_format and response_format.get("type") == "json_schema":
+                logger.debug(f"Raw response (first 200 chars): {content[:200]}")
+
             # Validate JSON if needed
             if response_format and response_format.get("type") == "json_schema":
                 try:
                     json.loads(content)
-                except json.JSONDecodeError:
-                    logger.warning("Response is not valid JSON, attempting to extract")
+                    logger.debug("Response is valid JSON")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Response is not valid JSON: {e}")
+                    logger.warning("Attempting to extract JSON from response")
                     import re
-                    # Try to extract JSON from markdown
-                    json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+
+                    # Try multiple extraction strategies
+                    # 1. Try to extract JSON from markdown code blocks
+                    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
                     if json_match:
                         content = json_match.group(1)
+                        logger.debug("Extracted JSON from markdown block")
                     else:
-                        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                        # 2. Try to find JSON object in text
+                        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
                         if json_match:
                             content = json_match.group(0)
+                            logger.debug("Extracted JSON from text")
+                        else:
+                            # 3. Last resort: wrap text in minimal JSON
+                            logger.error(f"Could not extract JSON, response: {content[:500]}")
+                            raise ValueError(
+                                f"Model did not return valid JSON. "
+                                f"Consider using a model that supports JSON mode. "
+                                f"Response: {content[:200]}..."
+                            )
 
             return LLMResponse(
                 content=content,
