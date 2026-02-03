@@ -10,6 +10,7 @@ import uvicorn
 
 from ..config import load_config
 from ..storage.chroma_client import ChromaManager
+from ..storage.call_graph_store import CallGraphStore
 from ..indexer.index_manager import IndexManager
 from ..providers import create_providers_from_config
 from ..utils.logger import setup_logger
@@ -35,13 +36,14 @@ app.add_middleware(
 config = None
 chroma = None
 indexer = None
+graph_store = None
 logger = None
 
 
 @app.on_event("startup")
 async def startup():
     """Initialize components on startup."""
-    global config, chroma, indexer, logger
+    global config, chroma, indexer, graph_store, logger
 
     config = load_config()
     logger = setup_logger("web", config.server.log_level)
@@ -49,6 +51,13 @@ async def startup():
 
     # Initialize ChromaDB
     chroma = ChromaManager(config.chroma)
+
+    # Initialize Call Graph Store
+    if config.call_graph.enabled:
+        db_path = Path(config.call_graph.db_path).resolve()
+        logger.info(f"Initializing call graph store at: {db_path}")
+        graph_store = CallGraphStore(db_path)
+        logger.info(f"Call graph store initialized with {db_path}")
 
     # Create providers
     llm_provider, embedding_provider = create_providers_from_config(config)
@@ -413,6 +422,305 @@ async def delete_project(project_path: str):
 
     except Exception as e:
         logger.error(f"Failed to delete project: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Call Graph API Endpoints
+# ============================================================================
+
+@app.get("/api/projects/{project_path:path}/call-graph/stats")
+async def get_call_graph_stats(project_path: str):
+    """
+    Получить статистику call graph для проекта.
+
+    Returns:
+        {
+            "status": "success",
+            "stats": {
+                "total_functions": int,
+                "total_calls": int,
+                "entry_points": int,
+                "layers": {"controller": int, "service": int, ...},
+                "trigger_types": {"http": int, "kafka": int, ...}
+            }
+        }
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        logger.info(f"[STATS DEBUG] Received project_path: {project_path}")
+        path = Path(project_path).resolve()
+        logger.info(f"[STATS DEBUG] Resolved path: {path}")
+        logger.info(f"[STATS DEBUG] graph_store.db_path: {graph_store.db_path}")
+
+        # Get all functions
+        functions = graph_store.get_all_functions(str(path))
+        logger.info(f"[STATS DEBUG] Functions returned: {len(functions)}")
+
+        # Calculate stats
+        entry_points = [f for f in functions if f.get('is_entry_point')]
+        layers = {}
+        trigger_types = {}
+
+        for func in functions:
+            layer = func.get('layer', 'unknown')
+            layers[layer] = layers.get(layer, 0) + 1
+
+            if func.get('trigger_type'):
+                trigger = func['trigger_type']
+                trigger_types[trigger] = trigger_types.get(trigger, 0) + 1
+
+        # Get total calls
+        calls = graph_store.get_all_calls(str(path))
+
+        return {
+            "status": "success",
+            "stats": {
+                "total_functions": len(functions),
+                "total_calls": len(calls),
+                "entry_points": len(entry_points),
+                "layers": layers,
+                "trigger_types": trigger_types
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get call graph stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/call-graph/functions")
+async def get_functions(
+    project_path: str,
+    layer: Optional[str] = None,
+    trigger_type: Optional[str] = None,
+    entry_points_only: bool = False,
+    limit: int = 100,
+    offset: int = 0
+):
+    """
+    Получить список функций с фильтрацией.
+
+    Args:
+        project_path: Путь к проекту
+        layer: Фильтр по слою (controller/service/repository/etc)
+        trigger_type: Фильтр по типу триггера (http/kafka/scheduled/etc)
+        entry_points_only: Только точки входа
+        limit: Лимит результатов
+        offset: Смещение для пагинации
+
+    Returns:
+        {
+            "total": int,
+            "functions": [
+                {
+                    "id": str,
+                    "name": str,
+                    "file_path": str,
+                    "line_number": int,
+                    "layer": str,
+                    "is_entry_point": bool,
+                    "trigger_type": str,
+                    "trigger_metadata": {...},
+                    "description": str
+                }
+            ]
+        }
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+
+        # Get all functions
+        functions = graph_store.get_all_functions(str(path))
+
+        # Apply filters
+        filtered = functions
+
+        if entry_points_only:
+            filtered = [f for f in filtered if f.get('is_entry_point')]
+
+        if layer:
+            filtered = [f for f in filtered if f.get('layer') == layer]
+
+        if trigger_type:
+            filtered = [f for f in filtered if f.get('trigger_type') == trigger_type]
+
+        # Paginate
+        total = len(filtered)
+        paginated = filtered[offset:offset + limit]
+
+        return {
+            "total": total,
+            "functions": paginated
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get functions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/call-graph/functions/{function_id}")
+async def get_function_details(project_path: str, function_id: str):
+    """
+    Получить детальную информацию о функции.
+
+    Returns:
+        {
+            "function": {...},
+            "calls": [...],  # Функции, которые вызывает эта функция
+            "callers": [...]  # Функции, которые вызывают эту функцию
+        }
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+
+        # Get function
+        func = graph_store.get_function(str(path), function_id)
+
+        if not func:
+            raise HTTPException(status_code=404, detail="Function not found")
+
+        # Get calls (what this function calls)
+        calls = graph_store.get_function_calls(str(path), function_id)
+
+        # Get callers (who calls this function)
+        callers = graph_store.get_function_callers(str(path), function_id)
+
+        return {
+            "function": func,
+            "calls": calls,
+            "callers": callers
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get function details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/call-graph/entry-points")
+async def get_entry_points(project_path: str):
+    """
+    Получить все точки входа (entry points) в проекте.
+
+    Returns:
+        {
+            "total": int,
+            "entry_points": [
+                {
+                    "function_id": str,
+                    "function_name": str,
+                    "file_path": str,
+                    "trigger_type": str,
+                    "trigger_metadata": {...},
+                    "layer": str
+                }
+            ]
+        }
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+
+        # Get all entry points
+        functions = graph_store.get_all_functions(str(path))
+        entry_points = [f for f in functions if f.get('is_entry_point')]
+
+        return {
+            "total": len(entry_points),
+            "entry_points": entry_points
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get entry points: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/projects/{project_path:path}/call-graph/trace")
+async def trace_call_flow(project_path: str, request: dict):
+    """
+    Построить граф вызовов от точки входа.
+
+    Request body:
+        {
+            "function_id": str,  # ID точки входа
+            "max_depth": int     # Максимальная глубина (optional, default 10)
+        }
+
+    Returns:
+        {
+            "status": "success",
+            "root": str,
+            "nodes": [...],
+            "edges": [...]
+        }
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+        function_id = request.get("function_id")
+        max_depth = request.get("max_depth", 10)
+
+        if not function_id:
+            raise HTTPException(status_code=400, detail="function_id is required")
+
+        # Build call tree
+        visited = set()
+        nodes = []
+        edges = []
+
+        def build_tree(func_id: str, depth: int):
+            if depth > max_depth or func_id in visited:
+                return
+
+            visited.add(func_id)
+
+            # Get function
+            func = graph_store.get_function(str(path), func_id)
+            if not func:
+                return
+
+            nodes.append(func)
+
+            # Get calls
+            calls = graph_store.get_function_calls(str(path), func_id)
+
+            for call in calls:
+                target_id = call.get('target_function_id')
+                if target_id:
+                    edges.append({
+                        "from": func_id,
+                        "to": target_id,
+                        "call_site": call.get('call_site', '')
+                    })
+                    build_tree(target_id, depth + 1)
+
+        build_tree(function_id, 0)
+
+        return {
+            "status": "success",
+            "root": function_id,
+            "nodes": nodes,
+            "edges": edges
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to trace call flow: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

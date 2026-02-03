@@ -495,6 +495,7 @@ def main():
         # Setup logger
         logger = setup_logger(__name__, config.server.log_level)
         logger.info(f"Starting {config.server.name} v{config.server.version}")
+        logger.info(f"Current working directory: {Path.cwd()}")
 
         # Initialize ChromaDB
         chroma = ChromaManager(config.chroma)

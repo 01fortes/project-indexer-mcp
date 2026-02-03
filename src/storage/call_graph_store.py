@@ -34,9 +34,15 @@ class CallGraphStore:
         Args:
             db_path: Path to SQLite database file
         """
-        self.db_path = db_path
+        # Ensure db_path is a Path object
+        self.db_path = Path(db_path) if not isinstance(db_path, Path) else db_path
+        # Convert to absolute path to avoid issues with relative paths
+        self.db_path = self.db_path.resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+
+        logger.info(f"Initializing CallGraphStore with database at: {self.db_path}")
+
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 
@@ -166,41 +172,62 @@ class CallGraphStore:
             project_path: Root path of project
             functions: List of function dicts with all fields
         """
+        logger.info(f"save_functions called with {len(functions)} functions for project: {project_path}")
         cursor = self.conn.cursor()
+
+        saved_count = 0
+        skipped_count = 0
 
         for func_data in functions:
             func_def = func_data.get('func_def')
             if not func_def:
+                skipped_count += 1
+                logger.warning(f"Skipping function - no func_def in data: {list(func_data.keys())}")
                 continue
 
             func_id = f"{func_data['file_path']}::{func_def.name}::{func_def.line_number}"
 
-            cursor.execute("""
-                INSERT OR REPLACE INTO functions (
-                    id, project_path, file_path, function_name, line_number,
-                    signature, layer, is_entry_point, trigger_type, trigger_metadata,
-                    description, parameters, return_type, is_async, is_method, class_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                func_id,
-                project_path,
-                func_data['file_path'],
-                func_def.name,
-                func_def.line_number,
-                self._format_signature(func_def),
-                func_data.get('layer'),
-                func_data.get('is_entry_point', False),
-                func_data.get('trigger_type'),
-                json.dumps(func_data['trigger_metadata']) if func_data.get('trigger_metadata') else None,
-                func_data.get('description'),
-                json.dumps(func_def.parameters),
-                func_def.return_type,
-                func_def.is_async,
-                func_def.is_method,
-                func_def.class_name
-            ))
+            try:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO functions (
+                        id, project_path, file_path, function_name, line_number,
+                        signature, layer, is_entry_point, trigger_type, trigger_metadata,
+                        description, parameters, return_type, is_async, is_method, class_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    func_id,
+                    project_path,
+                    func_data['file_path'],
+                    func_def.name,
+                    func_def.line_number,
+                    self._format_signature(func_def),
+                    func_data.get('layer'),
+                    func_data.get('is_entry_point', False),
+                    func_data.get('trigger_type'),
+                    json.dumps(func_data['trigger_metadata']) if func_data.get('trigger_metadata') else None,
+                    func_data.get('description'),
+                    json.dumps(func_def.parameters),
+                    func_def.return_type,
+                    func_def.is_async,
+                    func_def.is_method,
+                    func_def.class_name
+                ))
+                saved_count += 1
+            except Exception as e:
+                logger.error(f"Failed to save function {func_id}: {e}", exc_info=True)
+                skipped_count += 1
 
+        logger.info(f"Committing {saved_count} functions (skipped {skipped_count})")
         self.conn.commit()
+
+        # Force flush to disk
+        self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+
+        # Verify the save
+        cursor.execute("SELECT COUNT(*) FROM functions WHERE project_path = ?", (project_path,))
+        count_after = cursor.fetchone()[0]
+        logger.info(f"After commit: {count_after} functions in database for this project")
+        logger.info(f"Database file: {self.db_path}")
 
     def save_call(
         self,
@@ -246,23 +273,41 @@ class CallGraphStore:
             project_path: Root path of project
             calls: List of call relation dicts
         """
+        logger.info(f"save_calls called with {len(calls)} calls for project: {project_path}")
         cursor = self.conn.cursor()
 
-        for call_data in calls:
-            cursor.execute("""
-                INSERT INTO call_relations (
-                    project_path, caller_id, callee_id, caller_line, arguments, description
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                project_path,
-                call_data['caller_id'],
-                call_data['callee_id'],
-                call_data.get('caller_line'),
-                json.dumps(call_data.get('arguments')) if call_data.get('arguments') else None,
-                call_data.get('description')
-            ))
+        saved_count = 0
+        failed_count = 0
 
+        for call_data in calls:
+            try:
+                cursor.execute("""
+                    INSERT INTO call_relations (
+                        project_path, caller_id, callee_id, caller_line, arguments, description
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    project_path,
+                    call_data['caller_id'],
+                    call_data['callee_id'],
+                    call_data.get('caller_line'),
+                    json.dumps(call_data.get('arguments')) if call_data.get('arguments') else None,
+                    call_data.get('description')
+                ))
+                saved_count += 1
+            except Exception as e:
+                logger.error(f"Failed to save call {call_data.get('caller_id')} -> {call_data.get('callee_id')}: {e}")
+                failed_count += 1
+
+        logger.info(f"Committing {saved_count} calls (failed {failed_count})")
         self.conn.commit()
+
+        # Force flush to disk
+        self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+
+        # Verify the save
+        cursor.execute("SELECT COUNT(*) FROM call_relations WHERE project_path = ?", (project_path,))
+        count_after = cursor.fetchone()[0]
+        logger.info(f"After commit: {count_after} call relations in database for this project")
 
     def get_entry_points(self, project_path: str) -> List[Dict[str, Any]]:
         """
@@ -447,6 +492,175 @@ class CallGraphStore:
         cursor.execute("DELETE FROM call_relations WHERE project_path = ?", (project_path,))
         cursor.execute("DELETE FROM functions WHERE project_path = ?", (project_path,))
         self.conn.commit()
+
+    def get_all_functions(self, project_path: str) -> List[Dict[str, Any]]:
+        """
+        Get all functions in a project.
+
+        Args:
+            project_path: Project path
+
+        Returns:
+            List of function dictionaries
+        """
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                f.id,
+                f.function_name,
+                f.file_path,
+                f.line_number,
+                f.signature,
+                f.layer,
+                f.is_entry_point,
+                f.trigger_type,
+                f.trigger_metadata,
+                f.description,
+                f.parameters,
+                f.return_type
+            FROM functions f
+            WHERE f.project_path = ?
+            ORDER BY f.function_name
+        """, (project_path,))
+
+        functions = []
+        for row in cursor.fetchall():
+            functions.append({
+                'id': row[0],
+                'name': row[1],
+                'file_path': row[2],
+                'line_number': row[3],
+                'signature': row[4],
+                'layer': row[5],
+                'is_entry_point': bool(row[6]),
+                'trigger_type': row[7],
+                'trigger_metadata': json.loads(row[8]) if row[8] else {},
+                'description': row[9],
+                'parameters': json.loads(row[10]) if row[10] else [],
+                'return_type': row[11]
+            })
+
+        return functions
+
+    def get_all_calls(self, project_path: str) -> List[Dict[str, Any]]:
+        """
+        Get all calls in a project.
+
+        Args:
+            project_path: Project path
+
+        Returns:
+            List of call dictionaries
+        """
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                cr.id,
+                cr.caller_id,
+                cr.callee_id,
+                cr.caller_line,
+                caller.function_name as caller_name,
+                callee.function_name as callee_name
+            FROM call_relations cr
+            LEFT JOIN functions caller ON cr.caller_id = caller.id
+            LEFT JOIN functions callee ON cr.callee_id = callee.id
+            WHERE cr.project_path = ?
+        """, (project_path,))
+
+        calls = []
+        for row in cursor.fetchall():
+            calls.append({
+                'id': row[0],
+                'caller_id': row[1],
+                'callee_id': row[2],
+                'line_number': row[3],
+                'caller_name': row[4],
+                'callee_name': row[5]
+            })
+
+        return calls
+
+    def get_function_calls(self, project_path: str, function_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all calls made by a function (what this function calls).
+
+        Args:
+            project_path: Project path
+            function_id: Function ID
+
+        Returns:
+            List of calls with target function details
+        """
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                cr.id,
+                cr.callee_id,
+                cr.caller_line,
+                callee.function_name as callee_name,
+                callee.file_path as callee_file,
+                callee.layer as callee_layer
+            FROM call_relations cr
+            LEFT JOIN functions callee ON cr.callee_id = callee.id
+            WHERE cr.project_path = ? AND cr.caller_id = ?
+            ORDER BY cr.caller_line
+        """, (project_path, function_id))
+
+        calls = []
+        for row in cursor.fetchall():
+            calls.append({
+                'id': row[0],
+                'target_function_id': row[1],
+                'line_number': row[2],
+                'target_name': row[3],
+                'target_file': row[4],
+                'target_layer': row[5]
+            })
+
+        return calls
+
+    def get_function_callers(self, project_path: str, function_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all functions that call this function (who calls this function).
+
+        Args:
+            project_path: Project path
+            function_id: Function ID
+
+        Returns:
+            List of callers with function details
+        """
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                cr.id,
+                cr.caller_id,
+                cr.caller_line,
+                caller.function_name as caller_name,
+                caller.file_path as caller_file,
+                caller.layer as caller_layer
+            FROM call_relations cr
+            JOIN functions caller ON cr.caller_id = caller.id
+            WHERE cr.project_path = ? AND cr.callee_id = ?
+            ORDER BY caller.function_name, cr.caller_line
+        """, (project_path, function_id))
+
+        callers = []
+        for row in cursor.fetchall():
+            callers.append({
+                'id': row[0],
+                'caller_function_id': row[1],
+                'line_number': row[2],
+                'caller_name': row[3],
+                'caller_file': row[4],
+                'caller_layer': row[5]
+            })
+
+        return callers
 
     def get_statistics(self, project_path: str) -> Dict[str, Any]:
         """

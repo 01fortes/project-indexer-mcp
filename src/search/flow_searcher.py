@@ -69,21 +69,22 @@ class FlowSearcher:
 
         # Step 1: Generate query embedding
         logger.info("Step 1: Generating query embedding")
-        embedding_result = await self.embedding_provider.create_embedding(query)
-        query_embedding = embedding_result.embedding
+        query_embedding = await self.embedding_provider.create_embedding(query)
 
         # Step 2: Search ChromaDB for relevant entry points
         logger.info("Step 2: Searching for relevant entry points")
-        search_results = self.chroma.search(
+        collection = self.chroma.get_or_create_collection(project_path)
+        search_results = await self.chroma.search(
+            collection=collection,
             query_embedding=query_embedding,
             n_results=50,  # Get more candidates
-            where={'type': 'function'}  # Only functions
+            metadata_filter={'type': 'function'}  # Only functions
         )
 
         # Filter to entry points only
         entry_point_ids = []
         for result in search_results:
-            metadata = result.get('metadata', {})
+            metadata = result.metadata
             if metadata.get('is_entry_point') and metadata.get('project_path') == str(project_path):
                 entry_point_ids.append(metadata.get('function_id'))
 

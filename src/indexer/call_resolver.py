@@ -122,7 +122,13 @@ class CallResolver:
         Returns:
             ResolvedCall or None if unresolved
         """
-        caller_id = f"{caller_file}::{call.caller_function}::{call.line_number}"
+        # Get caller function definition line number (not call site line number)
+        caller_func_line = self._get_function_line(caller_file, call.caller_function)
+        if not caller_func_line:
+            # Fallback to call line if function not found
+            caller_func_line = call.line_number
+
+        caller_id = f"{caller_file}::{call.caller_function}::{caller_func_line}"
 
         # Case 1: Call has explicit module (e.g., my_module.function)
         if call.module:
@@ -149,16 +155,41 @@ class CallResolver:
                         confidence='high'
                     )
 
-        # Case 2: Call is in same file
-        same_file_id = self._find_function_in_file(caller_file, call.callee_name)
-        if same_file_id:
-            return ResolvedCall(
-                caller_id=caller_id,
-                callee_id=same_file_id,
-                caller_line=call.line_number,
-                arguments=call.arguments,
-                confidence='high'
-            )
+            # Case 1b: If module provided but not resolved via imports,
+            # try module hint before checking same file
+            global_matches = self.function_index.get(call.callee_name, [])
+            module_lower = call.module.lower()
+
+            filtered_matches = []
+            for target_file, func_def in global_matches:
+                file_name = Path(target_file).stem.lower()
+                # Exclude same file to avoid false matches
+                if target_file != caller_file and (module_lower in file_name or file_name in module_lower):
+                    filtered_matches.append((target_file, func_def))
+
+            if len(filtered_matches) == 1:
+                target_file, func_def = filtered_matches[0]
+                callee_id = f"{target_file}::{func_def.name}::{func_def.line_number}"
+                logger.debug(f"Resolved {call.callee_name} via module hint '{call.module}' to {target_file}")
+                return ResolvedCall(
+                    caller_id=caller_id,
+                    callee_id=callee_id,
+                    caller_line=call.line_number,
+                    arguments=call.arguments,
+                    confidence='medium'
+                )
+
+        # Case 2: Call is in same file (only if no module specified)
+        if not call.module:
+            same_file_id = self._find_function_in_file(caller_file, call.callee_name)
+            if same_file_id:
+                return ResolvedCall(
+                    caller_id=caller_id,
+                    callee_id=same_file_id,
+                    caller_line=call.line_number,
+                    arguments=call.arguments,
+                    confidence='high'
+                )
 
         # Case 3: Search through imports
         for import_stmt in imports:
@@ -183,7 +214,7 @@ class CallResolver:
                             confidence='medium'
                         )
 
-        # Case 4: Search globally (low confidence)
+        # Case 4: Search globally without module (low confidence)
         global_matches = self.function_index.get(call.callee_name, [])
         if len(global_matches) == 1:
             # Only one function with this name - probably it
@@ -198,7 +229,7 @@ class CallResolver:
             )
 
         # Unresolved - might be external library
-        logger.debug(f"Could not resolve call to {call.callee_name} from {caller_file}")
+        logger.debug(f"Could not resolve call to {call.callee_name} from {caller_file} (module: {call.module})")
         return None
 
     def _resolve_module_import(
@@ -266,6 +297,29 @@ class CallResolver:
         for func_def in functions:
             if func_def.name == function_name:
                 return f"{file_path}::{func_def.name}::{func_def.line_number}"
+
+        return None
+
+    def _get_function_line(
+        self,
+        file_path: str,
+        function_name: str
+    ) -> Optional[int]:
+        """
+        Get line number of function definition.
+
+        Args:
+            file_path: File path
+            function_name: Function name
+
+        Returns:
+            Line number of function definition or None
+        """
+        functions = self.functions_map.get(file_path, [])
+
+        for func_def in functions:
+            if func_def.name == function_name:
+                return func_def.line_number
 
         return None
 

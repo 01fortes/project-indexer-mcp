@@ -135,16 +135,12 @@ class ASTAnalyzer:
             parser = self.parsers[lang_key]
             tree = parser.parse(bytes(code, "utf8"))
 
-            # Extract call graph based on language
-            if lang_key == 'python':
-                return self._analyze_python(tree, code)
-            elif lang_key in ['javascript', 'typescript']:
-                return self._analyze_javascript(tree, code)
-            elif lang_key == 'go':
-                return self._analyze_go(tree, code)
-            else:
-                # Generic analysis for other languages
-                return self._analyze_generic(tree, code, lang_key)
+            # Use strategy pattern: get appropriate analyzer for language
+            from .analyzers import get_analyzer
+            analyzer = get_analyzer(lang_key)
+
+            # Delegate analysis to language-specific analyzer
+            return analyzer.analyze(tree, code, file_path)
 
         except Exception as e:
             logger.error(f"AST analysis failed for {file_path}: {e}")

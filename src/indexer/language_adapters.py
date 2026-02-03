@@ -562,6 +562,7 @@ class KotlinAdapter(LanguageAdapter):
         """Detect triggers in Kotlin code."""
         triggers = []
 
+        # Detect HTTP endpoints (Spring)
         for annotation in self.HTTP_ANNOTATIONS:
             for match in re.finditer(rf'{annotation}\s*\([^)]*\)', code):
                 method_match = re.search(r'(Get|Post|Put|Delete|Patch)', annotation)
@@ -579,6 +580,46 @@ class KotlinAdapter(LanguageAdapter):
                     function_name=func_name,
                     trigger_type='http',
                     metadata={'method': method, 'path': path, 'annotation': annotation}
+                ))
+
+        # Detect gRPC service methods (Kotlin Coroutines)
+        # Pattern: class ServiceName(...) : SomeServiceCoroutineImplBase()
+        grpc_class_pattern = r'class\s+(\w+)\s*\([^)]*\)\s*:\s*([\w.]+CoroutineImplBase)\(\)'
+        for class_match in re.finditer(grpc_class_pattern, code):
+            class_name = class_match.group(1)
+            base_class = class_match.group(2)
+
+            # Extract service name from base class (e.g., "ConfigServiceGrpcKt.ConfigServiceCoroutineImplBase" -> "ConfigService")
+            service_match = re.search(r'(\w+)(?:Grpc)?(?:Kt)?\.?(\w+)?CoroutineImplBase', base_class)
+            service_name = service_match.group(1) if service_match else class_name
+
+            # Find the class body (everything until the next top-level class or end of file)
+            class_start = class_match.end()
+            # Find matching closing brace for class body
+            brace_count = 0
+            class_end = class_start
+            found_open = False
+            for i in range(class_start, len(code)):
+                if code[i] == '{':
+                    brace_count += 1
+                    found_open = True
+                elif code[i] == '}':
+                    brace_count -= 1
+                    if found_open and brace_count == 0:
+                        class_end = i
+                        break
+
+            class_body = code[class_start:class_end]
+
+            # Find all override suspend fun methods in this class
+            method_pattern = r'override\s+suspend\s+fun\s+(\w+)\s*\('
+            for method_match in re.finditer(method_pattern, class_body):
+                method_name = method_match.group(1)
+
+                triggers.append(TriggerInfo(
+                    function_name=method_name,
+                    trigger_type='grpc',
+                    metadata={'service': service_name, 'method': method_name, 'class': class_name}
                 ))
 
         return triggers

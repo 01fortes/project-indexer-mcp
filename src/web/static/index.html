@@ -278,6 +278,13 @@
                             >
                                 📁 Файлы ({{ selectedProject.total_files }})
                             </button>
+                            <button
+                                @click="currentTab = 'callgraph'; loadCallGraphData()"
+                                :class="currentTab === 'callgraph' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+                                class="py-4 px-6 border-b-2 font-medium text-sm"
+                            >
+                                📊 Call Graph
+                            </button>
                         </div>
                     </div>
 
@@ -387,6 +394,135 @@
                                 <div v-if="filteredFiles.length === 0" class="text-center py-8 text-gray-500">
                                     Файлы не найдены
                                 </div>
+                            </div>
+                        </div>
+
+                        <!-- Call Graph Tab -->
+                        <div v-if="currentTab === 'callgraph'" class="space-y-6">
+                            <!-- Loading -->
+                            <div v-if="loadingCallGraph" class="text-center py-8">
+                                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                                <p class="text-gray-500 mt-2">Загрузка call graph...</p>
+                            </div>
+
+                            <!-- Call Graph Content -->
+                            <div v-else-if="callGraphStats">
+                                <!-- Stats Cards -->
+                                <div class="grid grid-cols-4 gap-4">
+                                    <div class="bg-blue-50 rounded-lg p-4">
+                                        <div class="text-sm text-gray-600">Functions</div>
+                                        <div class="text-2xl font-bold text-blue-600">{{ callGraphStats.total_functions }}</div>
+                                    </div>
+                                    <div class="bg-green-50 rounded-lg p-4">
+                                        <div class="text-sm text-gray-600">Calls</div>
+                                        <div class="text-2xl font-bold text-green-600">{{ callGraphStats.total_calls }}</div>
+                                    </div>
+                                    <div class="bg-purple-50 rounded-lg p-4">
+                                        <div class="text-sm text-gray-600">Entry Points</div>
+                                        <div class="text-2xl font-bold text-purple-600">{{ callGraphStats.entry_points }}</div>
+                                    </div>
+                                    <div class="bg-orange-50 rounded-lg p-4">
+                                        <div class="text-sm text-gray-600">Layers</div>
+                                        <div class="text-2xl font-bold text-orange-600">{{ Object.keys(callGraphStats.layers || {}).length }}</div>
+                                    </div>
+                                </div>
+
+                                <!-- Layers Distribution -->
+                                <div v-if="callGraphStats.layers && Object.keys(callGraphStats.layers).length > 0">
+                                    <h4 class="font-semibold text-gray-800 mb-3">📊 Architectural Layers</h4>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <div v-for="(count, layer) in callGraphStats.layers" :key="layer"
+                                             class="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                                            <span class="text-gray-700 font-medium">{{ layer }}</span>
+                                            <span class="font-bold text-gray-900">{{ count }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Entry Points -->
+                                <div v-if="entryPoints.length > 0">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <h4 class="font-semibold text-gray-800">⚡ Entry Points ({{ entryPoints.length }})</h4>
+                                    </div>
+                                    <div class="space-y-2 max-h-64 overflow-y-auto">
+                                        <div v-for="ep in entryPoints" :key="ep.function_id"
+                                             @click="showFunctionDetails(ep.function_id)"
+                                             class="bg-white border rounded-lg p-4 hover:border-blue-500 cursor-pointer transition">
+                                            <div class="flex items-start justify-between">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="font-mono font-semibold text-gray-900">{{ ep.function_name }}</div>
+                                                    <div class="text-sm text-gray-600 mt-1 truncate">{{ ep.file_path }}</div>
+                                                </div>
+                                                <div class="flex gap-2 ml-4">
+                                                    <span class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded whitespace-nowrap">
+                                                        {{ ep.trigger_type || 'function' }}
+                                                    </span>
+                                                    <span class="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded whitespace-nowrap">
+                                                        {{ ep.layer || 'unknown' }}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Functions List -->
+                                <div>
+                                    <h4 class="font-semibold text-gray-800 mb-3">🔧 Functions</h4>
+
+                                    <!-- Filters -->
+                                    <div class="flex gap-3 mb-4 flex-wrap">
+                                        <select v-model="callGraphFilter.layer" @change="loadCallGraphFunctions"
+                                                class="px-3 py-2 border rounded-lg text-sm">
+                                            <option value="">All Layers</option>
+                                            <option v-for="(count, layer) in callGraphStats.layers" :key="layer" :value="layer">
+                                                {{ layer }} ({{ count }})
+                                            </option>
+                                        </select>
+                                        <select v-model="callGraphFilter.triggerType" @change="loadCallGraphFunctions"
+                                                class="px-3 py-2 border rounded-lg text-sm">
+                                            <option value="">All Triggers</option>
+                                            <option v-for="(count, trigger) in callGraphStats.trigger_types" :key="trigger" :value="trigger">
+                                                {{ trigger }} ({{ count }})
+                                            </option>
+                                        </select>
+                                        <label class="flex items-center gap-2 px-3 py-2 border rounded-lg text-sm cursor-pointer hover:bg-gray-50">
+                                            <input type="checkbox" v-model="callGraphFilter.entryPointsOnly" @change="loadCallGraphFunctions" class="rounded">
+                                            <span>Entry Points Only</span>
+                                        </label>
+                                    </div>
+
+                                    <!-- Functions -->
+                                    <div v-if="callGraphFunctions.length > 0" class="space-y-2 max-h-96 overflow-y-auto">
+                                        <div v-for="func in callGraphFunctions" :key="func.id"
+                                             @click="showFunctionDetails(func.id)"
+                                             class="bg-white border rounded-lg p-3 hover:border-blue-500 cursor-pointer transition">
+                                            <div class="flex items-start justify-between">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="font-mono font-medium text-gray-900">
+                                                        {{ func.name }}
+                                                        <span v-if="func.is_entry_point" class="ml-2 text-xs text-green-600">⚡</span>
+                                                    </div>
+                                                    <div class="text-xs text-gray-500 mt-1 truncate">{{ func.file_path }}:{{ func.line_number }}</div>
+                                                    <div v-if="func.description" class="text-sm text-gray-600 mt-1 line-clamp-2">{{ func.description }}</div>
+                                                </div>
+                                                <span class="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded ml-4 whitespace-nowrap">
+                                                    {{ func.layer }}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div v-else class="text-center py-8 text-gray-500">
+                                        Функции не найдены
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- No Call Graph Data -->
+                            <div v-else class="text-center py-12">
+                                <div class="text-gray-400 text-6xl mb-4">📊</div>
+                                <p class="text-gray-600 mb-2">Call graph данные недоступны</p>
+                                <p class="text-sm text-gray-500">Переиндексируйте проект с помощью index_project_with_call_graph</p>
                             </div>
                         </div>
                     </div>
@@ -594,7 +730,18 @@
                         type: 'info', // success, error, info
                         title: '',
                         message: ''
-                    }
+                    },
+                    // Call Graph
+                    callGraphStats: null,
+                    entryPoints: [],
+                    callGraphFunctions: [],
+                    callGraphFilter: {
+                        layer: '',
+                        triggerType: '',
+                        entryPointsOnly: false
+                    },
+                    loadingCallGraph: false,
+                    selectedFunction: null
                 };
             },
             computed: {
@@ -897,6 +1044,123 @@
                         await this.viewFileContent(file);
                     } else {
                         this.showNotification('info', 'Файл не найден', 'Возможно, файл был удален');
+                    }
+                },
+
+                // Call Graph Methods
+                async loadCallGraphData() {
+                    if (!this.selectedProject || this.loadingCallGraph) return;
+
+                    this.loadingCallGraph = true;
+                    this.callGraphStats = null;
+                    this.entryPoints = [];
+                    this.callGraphFunctions = [];
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.selectedProject.project_path);
+
+                        // Load stats
+                        const statsResponse = await fetch(`/api/projects/${encodedPath}/call-graph/stats`);
+                        if (statsResponse.ok) {
+                            const statsData = await statsResponse.json();
+                            this.callGraphStats = statsData.stats;
+                        }
+
+                        // Load entry points
+                        const epResponse = await fetch(`/api/projects/${encodedPath}/call-graph/entry-points`);
+                        if (epResponse.ok) {
+                            const epData = await epResponse.json();
+                            this.entryPoints = epData.entry_points;
+                        }
+
+                        // Load functions
+                        await this.loadCallGraphFunctions();
+
+                    } catch (error) {
+                        console.error('Failed to load call graph data:', error);
+                        this.showNotification('error', 'Ошибка', 'Не удалось загрузить call graph данные');
+                    } finally {
+                        this.loadingCallGraph = false;
+                    }
+                },
+
+                async loadCallGraphFunctions() {
+                    if (!this.selectedProject) return;
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.selectedProject.project_path);
+                        const params = new URLSearchParams();
+
+                        if (this.callGraphFilter.layer) {
+                            params.append('layer', this.callGraphFilter.layer);
+                        }
+                        if (this.callGraphFilter.triggerType) {
+                            params.append('trigger_type', this.callGraphFilter.triggerType);
+                        }
+                        if (this.callGraphFilter.entryPointsOnly) {
+                            params.append('entry_points_only', 'true');
+                        }
+
+                        const response = await fetch(`/api/projects/${encodedPath}/call-graph/functions?${params}`);
+                        if (response.ok) {
+                            const data = await response.json();
+                            this.callGraphFunctions = data.functions;
+                        }
+                    } catch (error) {
+                        console.error('Failed to load call graph functions:', error);
+                    }
+                },
+
+                async showFunctionDetails(functionId) {
+                    if (!this.selectedProject) return;
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.selectedProject.project_path);
+                        const response = await fetch(`/api/projects/${encodedPath}/call-graph/functions/${functionId}`);
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            this.selectedFunction = data;
+
+                            // Format details for display
+                            const func = data.function;
+                            const calls = data.calls || [];
+                            const callers = data.callers || [];
+
+                            let message = `Function: ${func.name}\n`;
+                            message += `File: ${func.file_path}:${func.line_number}\n`;
+                            message += `Layer: ${func.layer || 'unknown'}\n\n`;
+
+                            if (func.description) {
+                                message += `Description: ${func.description}\n\n`;
+                            }
+
+                            message += `Calls (${calls.length}):\n`;
+                            calls.slice(0, 5).forEach(call => {
+                                message += `  → ${call.callee_name}`;
+                                if (call.target_name) {
+                                    message += ` (${call.target_name})`;
+                                }
+                                message += `\n`;
+                            });
+                            if (calls.length > 5) {
+                                message += `  ... и еще ${calls.length - 5}\n`;
+                            }
+
+                            message += `\nCalled by (${callers.length}):\n`;
+                            callers.slice(0, 5).forEach(caller => {
+                                message += `  ← ${caller.caller_name}\n`;
+                            });
+                            if (callers.length > 5) {
+                                message += `  ... и еще ${callers.length - 5}\n`;
+                            }
+
+                            // Show modal or alert
+                            alert(message);
+                        }
+                    } catch (error) {
+                        console.error('Failed to load function details:', error);
+                        this.showNotification('error', 'Ошибка', 'Не удалось загрузить детали функции');
                     }
                 }
             }

@@ -216,9 +216,11 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     )
 
     # Call graph configuration
+    # Default: use same directory as ChromaDB
+    default_db_path = os.path.join(chroma_config.persist_directory, "call_graph.db")
     call_graph_config = CallGraphConfig(
         enabled=os.getenv("CALL_GRAPH_ENABLED", "true").lower() == "true",
-        db_path=os.getenv("CALL_GRAPH_DB_PATH", "./call_graph.db"),
+        db_path=os.getenv("CALL_GRAPH_DB_PATH", default_db_path),
         max_call_depth=int(os.getenv("CALL_GRAPH_MAX_DEPTH", "10")),
         resolve_cross_file=os.getenv("CALL_GRAPH_RESOLVE_CROSS_FILE", "true").lower() == "true"
     )
