@@ -195,6 +195,10 @@ class ChromaManager:
                     document = results['documents'][0][i]
                     distance = results['distances'][0][i]
 
+                    # DEBUG: Log metadata purpose
+                    purpose_value = metadata.get('purpose', 'KEY_NOT_FOUND')
+                    logger.info(f"Result {i}: relative_path={metadata.get('relative_path')}, purpose='{purpose_value}', has_purpose_key={'purpose' in metadata}")
+
                     # Convert distance to similarity score (0-1, higher is better)
                     score = 1 / (1 + distance)
 

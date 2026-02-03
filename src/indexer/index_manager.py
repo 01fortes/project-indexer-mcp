@@ -673,12 +673,13 @@ Purpose: {context.purpose}
             formatted_results = []
             for result in results:
                 formatted_result = {
+                    "project_path": str(project_path),
                     "relative_path": result.relative_path,
                     "chunk_index": result.chunk_index,
                     "total_chunks": result.metadata.get("total_chunks"),
                     "language": result.metadata.get("language"),
                     "file_type": result.metadata.get("file_type"),
-                    "purpose": result.purpose,
+                    "purpose": result.purpose or result.metadata.get("purpose", "Нет описания"),
                     "score": result.score
                 }
 

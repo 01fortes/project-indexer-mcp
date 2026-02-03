@@ -246,7 +246,7 @@ async def list_project_files(project_path: str, limit: int = 100, offset: int = 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/projects/{project_path:path}/search")
+@app.get("/api/projects/{project_path:path}/search")
 async def search_in_project(
     project_path: str,
     query: str,

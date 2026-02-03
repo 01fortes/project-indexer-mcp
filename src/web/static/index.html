@@ -963,6 +963,7 @@
                         if (this.searchProjectPath) {
                             // Search in specific project
                             const results = await this.searchInProject(this.searchProjectPath, this.globalSearchQuery);
+                            console.log('Search results from single project:', results);
                             this.searchResults = results;
                         } else {
                             // Search in all projects
@@ -974,7 +975,10 @@
                             // Sort by score descending
                             allResults.sort((a, b) => b.score - a.score);
                             this.searchResults = allResults.slice(0, 20); // Top 20 results
+                            console.log('Search results from all projects (top 20):', this.searchResults);
                         }
+
+                        console.log('Final searchResults assigned:', this.searchResults);
 
                         if (this.searchResults.length > 0) {
                             this.showNotification('success', 'Найдено', `${this.searchResults.length} файлов`);
@@ -998,14 +1002,21 @@
                         }
 
                         const data = await response.json();
+                        console.log('API Response:', data);
 
                         if (data.status === 'success') {
                             // Add project info to each result
-                            return data.results.map(result => ({
-                                ...result,
-                                project_path: projectPath,
-                                project_name: this.projects.find(p => p.project_path === projectPath)?.project_name || projectPath
-                            }));
+                            const mappedResults = data.results.map(result => {
+                                console.log('Mapping result:', result);
+                                const mapped = {
+                                    ...result,
+                                    project_path: projectPath,
+                                    project_name: this.projects.find(p => p.project_path === projectPath)?.project_name || projectPath
+                                };
+                                console.log('Mapped result:', mapped);
+                                return mapped;
+                            });
+                            return mappedResults;
                         }
                         return [];
                     } catch (error) {
@@ -1027,23 +1038,36 @@
                         return;
                     }
 
-                    // Select the project
-                    this.selectProject(project);
+                    // Open project details modal
+                    await this.openProjectDetails(project);
 
                     // Switch to files tab
-                    this.currentTab = 'files';
+                    this.activeTab = 'files';
 
                     // Load files if not loaded
                     if (this.projectFiles.length === 0) {
                         await this.loadProjectFiles();
                     }
 
-                    // Find and open the file
-                    const file = this.projectFiles.find(f => f.relative_path === result.relative_path);
-                    if (file) {
-                        await this.viewFileContent(file);
-                    } else {
-                        this.showNotification('info', 'Файл не найден', 'Возможно, файл был удален');
+                    // Create a file object from search result
+                    const fileToOpen = {
+                        relative_path: result.relative_path,
+                        file_type: result.file_type || 'code',
+                        language: result.language || 'unknown'
+                    };
+
+                    // Open the file content
+                    await this.viewFileContent(fileToOpen);
+
+                    // Highlight search query in the file content if possible
+                    if (this.lastSearchQuery) {
+                        // Try to scroll to matching text
+                        setTimeout(() => {
+                            const content = document.querySelector('.file-content');
+                            if (content && window.find) {
+                                window.find(this.lastSearchQuery);
+                            }
+                        }, 300);
                     }
                 },
 
