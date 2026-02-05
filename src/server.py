@@ -1,19 +1,19 @@
 """MCP Server for project indexing."""
 
+import asyncio
+import atexit
+import signal
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from mcp.server.fastmcp import FastMCP
 
 from .config import load_config
 from .indexer.index_manager import IndexManager
-from .indexer.enhanced_indexer import EnhancedIndexManager
 from .providers import create_providers_from_config
 from .storage.chroma_client import ChromaManager
-from .storage.call_graph_store import CallGraphStore
-from .search.flow_searcher import FlowSearcher
 from .utils.logger import setup_logger
 from .utils.rate_limiter import RateLimiter
 
@@ -23,11 +23,54 @@ mcp = FastMCP("project-indexer")
 # Global state
 config = None
 chroma = None
-graph_store = None
 indexer = None
-enhanced_indexer = None
-flow_searcher = None
 logger = None
+active_tasks: Set[asyncio.Task] = set()
+_shutdown_in_progress = False
+
+
+async def cancel_all_tasks():
+    """Cancel all active tasks."""
+    global active_tasks
+    for task in list(active_tasks):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    active_tasks.clear()
+
+
+def cleanup():
+    """Cleanup resources on shutdown."""
+    global chroma, _shutdown_in_progress
+
+    if _shutdown_in_progress:
+        return
+    _shutdown_in_progress = True
+
+    if logger:
+        logger.info("Shutting down, cleaning up resources...")
+
+    try:
+        # Cancel all active tasks first
+        if active_tasks:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(cancel_all_tasks())
+                else:
+                    asyncio.run(cancel_all_tasks())
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Error cancelling tasks: {e}")
+
+        if logger:
+            logger.info("Cleanup complete")
+    except Exception as e:
+        if logger:
+            logger.error(f"Error during cleanup: {e}")
 
 
 @mcp.tool()
@@ -54,6 +97,7 @@ async def index_project(
     """
     try:
         path = Path(project_path).resolve()
+        logger.info(f"index_project called: project_path={path}, force_reindex={force_reindex}")
 
         if not path.exists():
             return {"status": "failed", "error": "Project path does not exist"}
@@ -61,8 +105,36 @@ async def index_project(
         if not path.is_dir():
             return {"status": "failed", "error": "Project path is not a directory"}
 
-        # TODO: Handle custom patterns if provided
-        result = await indexer.index_project(path, force_reindex)
+        # Handle custom patterns
+        logger.info(f"Calling indexer.index_project with force_reindex={force_reindex}")
+        logger.info(f"File patterns: {file_patterns}, Exclude patterns: {exclude_patterns}")
+        result = await indexer.index_project(
+            path,
+            force_reindex,
+            file_patterns=file_patterns,
+            exclude_patterns=exclude_patterns
+        )
+
+        # Add human-readable summary for MCP client
+        if result.get('status') == 'success':
+            stats = result.get('stats', {})
+            summary_lines = [
+                f"✅ Индексация завершена успешно!",
+                f"",
+                f"📊 Статистика:",
+                f"  • Всего файлов: {stats.get('total_files', 0)}",
+                f"  • Проиндексировано: {stats.get('indexed_files', 0)}",
+                f"  • Пропущено: {stats.get('skipped_files', 0)}",
+                f"  • Ошибок: {stats.get('failed_files', 0)}",
+                f"  • Чанков в индексе: {stats.get('total_chunks', 0)}",
+                f"",
+                f"⏱️  Время: {stats.get('duration_seconds', 0):.1f}s",
+            ]
+
+            if stats.get('resumed'):
+                summary_lines.insert(1, f"🔄 Возобновлено с чекпоинта")
+
+            result['summary'] = '\n'.join(summary_lines)
 
         return result
 
@@ -370,123 +442,21 @@ async def search_files(
         return {"status": "failed", "error": str(e)}
 
 
-@mcp.tool()
-async def index_project_with_call_graph(
-    project_path: str,
-    force_reindex: bool = False
-) -> dict:
-    """
-    Index project with advanced call graph analysis.
-
-    This performs two-pass indexing:
-    1. Pass 1 (Structural): AST parsing for call graph extraction
-    2. Pass 2 (Semantic): LLM enrichment with descriptions
-
-    The result is stored in dual storage:
-    - ChromaDB: For semantic search
-    - SQLite: For graph traversal and call stack analysis
-
-    Args:
-        project_path: Absolute path to project root directory
-        force_reindex: Force reindex even if already indexed
-
-    Returns:
-        Dictionary with indexing results including call graph statistics
-    """
-    try:
-        path = Path(project_path).resolve()
-
-        if not path.exists():
-            return {"status": "failed", "error": "Project path does not exist"}
-
-        if not path.is_dir():
-            return {"status": "failed", "error": "Project path is not a directory"}
-
-        # Check if call graph is enabled
-        if not config.call_graph.enabled:
-            return {
-                "status": "failed",
-                "error": "Call graph indexing is disabled in configuration"
-            }
-
-        # Use enhanced indexer
-        result = await enhanced_indexer.index_project_with_call_graph(path, force_reindex)
-
-        return result
-
-    except Exception as e:
-        logger.error(f"index_project_with_call_graph failed: {e}")
-        return {"status": "failed", "error": str(e)}
-
-
-@mcp.tool()
-async def trace_code_flow(
-    project_path: str,
-    query: str,
-    max_depth: int = 10,
-    max_flows: int = 10
-) -> dict:
-    """
-    Trace complete code execution flows from triggers to external APIs.
-
-    This tool finds relevant entry points (HTTP endpoints, Kafka consumers, etc.)
-    and builds complete call stacks showing how code flows through architectural
-    layers (trigger → controller → service → provider → external).
-
-    Perfect for:
-    - Understanding how a feature works end-to-end
-    - Finding all code paths for a specific operation
-    - Tracing data flow through the system
-    - Impact analysis for changes
-
-    Args:
-        project_path: Absolute path to project root
-        query: Natural language query (e.g., "How is notification sent?")
-        max_depth: Maximum call stack depth to traverse (default: 10)
-        max_flows: Maximum number of flows to return (default: 10)
-
-    Returns:
-        Dictionary with:
-        - query: Original query
-        - found_flows: Number of flows found
-        - flows: List of complete execution flows with:
-          - flow_id: Unique identifier
-          - flow_name: Descriptive name
-          - trigger: Entry point information (HTTP/Kafka/etc.)
-          - layers: Functions grouped by architectural layer
-          - full_call_stack: Complete call hierarchy
-          - depth: Maximum depth of calls
-          - function_count: Total functions in flow
-    """
-    try:
-        path = Path(project_path).resolve()
-
-        # Check if project is indexed with call graph
-        if not graph_store.has_project(str(path)):
-            return {
-                "status": "error",
-                "error": "Project not indexed with call graph. Please run index_project_with_call_graph first."
-            }
-
-        # Search flows
-        result = await flow_searcher.search_flows(
-            path,
-            query,
-            max_depth,
-            max_flows
-        )
-
-        result['status'] = 'success'
-        return result
-
-    except Exception as e:
-        logger.error(f"trace_code_flow failed: {e}")
-        return {"status": "failed", "error": str(e)}
-
-
 def main():
     """Main entry point for the MCP server."""
-    global config, chroma, graph_store, indexer, enhanced_indexer, flow_searcher, logger
+    global config, chroma, indexer, logger
+
+    # Register cleanup handlers
+    atexit.register(cleanup)
+
+    def signal_handler(signum, frame):
+        if logger:
+            logger.info(f"Received signal {signum}, initiating shutdown...")
+        cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     try:
         # Load configuration
@@ -500,14 +470,6 @@ def main():
         # Initialize ChromaDB
         chroma = ChromaManager(config.chroma)
 
-        # Initialize Call Graph Store if enabled
-        if config.call_graph.enabled:
-            graph_store = CallGraphStore(Path(config.call_graph.db_path))
-            logger.info(f"Call graph store initialized at {config.call_graph.db_path}")
-        else:
-            graph_store = None
-            logger.info("Call graph disabled in configuration")
-
         # Create providers from configuration
         llm_provider, embedding_provider = create_providers_from_config(config)
         logger.info(f"Using LLM: {llm_provider.model_name}, Embedding: {embedding_provider.model_name}")
@@ -520,14 +482,6 @@ def main():
 
         # Initialize index manager with providers
         indexer = IndexManager(config, chroma, llm_provider, embedding_provider, rate_limiter)
-
-        # Initialize enhanced indexer if call graph is enabled
-        if config.call_graph.enabled:
-            enhanced_indexer = EnhancedIndexManager(
-                config, chroma, graph_store, llm_provider, embedding_provider, rate_limiter
-            )
-            flow_searcher = FlowSearcher(chroma, graph_store, embedding_provider)
-            logger.info("Enhanced indexer and flow searcher initialized")
 
         logger.info("All components initialized successfully")
 

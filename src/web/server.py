@@ -10,7 +10,6 @@ import uvicorn
 
 from ..config import load_config
 from ..storage.chroma_client import ChromaManager
-from ..storage.call_graph_store import CallGraphStore
 from ..indexer.index_manager import IndexManager
 from ..providers import create_providers_from_config
 from ..utils.logger import setup_logger
@@ -36,14 +35,13 @@ app.add_middleware(
 config = None
 chroma = None
 indexer = None
-graph_store = None
 logger = None
 
 
 @app.on_event("startup")
 async def startup():
     """Initialize components on startup."""
-    global config, chroma, indexer, graph_store, logger
+    global config, chroma, indexer, logger
 
     config = load_config()
     logger = setup_logger("web", config.server.log_level)
@@ -51,13 +49,6 @@ async def startup():
 
     # Initialize ChromaDB
     chroma = ChromaManager(config.chroma)
-
-    # Initialize Call Graph Store
-    if config.call_graph.enabled:
-        db_path = Path(config.call_graph.db_path).resolve()
-        logger.info(f"Initializing call graph store at: {db_path}")
-        graph_store = CallGraphStore(db_path)
-        logger.info(f"Call graph store initialized with {db_path}")
 
     # Create providers
     llm_provider, embedding_provider = create_providers_from_config(config)
@@ -725,6 +716,170 @@ async def trace_call_flow(project_path: str, request: dict):
 
 
 # ============================================================================
+# Checkpoint Monitoring
+# ============================================================================
+
+@app.get("/api/checkpoints/{project_path:path}/stats")
+async def get_checkpoint_stats(project_path: str, index_type: Optional[str] = None):
+    """
+    Get checkpoint statistics for a project.
+
+    Returns summary of completed/failed files for each pass.
+
+    Args:
+        project_path: Project path
+        index_type: Filter by index type ('simple', 'graph', or None for all)
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+        stats = graph_store.get_checkpoint_stats(str(path), index_type)
+
+        return {
+            "status": "success",
+            "project_path": str(path),
+            "index_type": index_type,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Failed to get checkpoint stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/checkpoints/{project_path:path}")
+async def get_checkpoints(
+    project_path: str,
+    pass_number: Optional[int] = None,
+    status: Optional[str] = None,
+    index_type: Optional[str] = None,
+    limit: int = 1000,
+    offset: int = 0
+):
+    """
+    Get detailed checkpoint list for a project.
+
+    Args:
+        project_path: Project path
+        pass_number: Filter by pass (1 or 2)
+        status: Filter by status (completed/failed)
+        index_type: Filter by index type ('simple' or 'graph')
+        limit: Max results
+        offset: Pagination offset
+
+    Returns:
+        List of checkpoints with details
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+
+        # Build query
+        query = "SELECT * FROM indexing_checkpoints WHERE project_path = ?"
+        params = [str(path)]
+
+        if pass_number:
+            query += " AND pass_number = ?"
+            params.append(pass_number)
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        if index_type:
+            query += " AND index_type = ?"
+            params.append(index_type)
+
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        # Execute query
+        cursor = graph_store.conn.cursor()
+        cursor.execute(query, params)
+
+        checkpoints = []
+        for row in cursor.fetchall():
+            checkpoints.append({
+                "id": row[0],
+                "project_path": row[1],
+                "file_path": row[2],
+                "status": row[3],
+                "pass_number": row[4],
+                "error_message": row[5],
+                "created_at": row[6],
+                "index_type": row[7] if len(row) > 7 else "simple"  # Fallback for old schema
+            })
+
+        # Get total count
+        count_query = "SELECT COUNT(*) FROM indexing_checkpoints WHERE project_path = ?"
+        count_params = [str(path)]
+
+        if pass_number:
+            count_query += " AND pass_number = ?"
+            count_params.append(pass_number)
+
+        if status:
+            count_query += " AND status = ?"
+            count_params.append(status)
+
+        if index_type:
+            count_query += " AND index_type = ?"
+            count_params.append(index_type)
+
+        cursor.execute(count_query, count_params)
+        total = cursor.fetchone()[0]
+
+        return {
+            "status": "success",
+            "checkpoints": checkpoints,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get checkpoints: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/checkpoints/{project_path:path}")
+async def clear_checkpoints(project_path: str, index_type: Optional[str] = None):
+    """
+    Clear checkpoints for a project.
+
+    Args:
+        project_path: Project path
+        index_type: If specified, clear only checkpoints of this type ('simple' or 'graph')
+
+    Useful for forcing fresh reindex.
+    """
+    if not graph_store:
+        raise HTTPException(status_code=503, detail="Call graph not enabled")
+
+    try:
+        path = Path(project_path).resolve()
+        graph_store.clear_checkpoints(str(path), index_type)
+
+        message = f"Cleared checkpoints for {path}"
+        if index_type:
+            message += f" (index type: {index_type})"
+        else:
+            message += " (all index types)"
+
+        return {
+            "status": "success",
+            "message": message
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to clear checkpoints: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Static Files (Frontend)
 # ============================================================================
 
@@ -740,6 +895,14 @@ if static_dir.exists():
         if index_file.exists():
             return FileResponse(str(index_file))
         return {"message": "Frontend not available. Create src/web/static/index.html"}
+
+    @app.get("/checkpoints")
+    async def serve_checkpoints():
+        """Serve the checkpoint monitoring page."""
+        checkpoints_file = static_dir / "checkpoints.html"
+        if checkpoints_file.exists():
+            return FileResponse(str(checkpoints_file))
+        return {"message": "Checkpoints page not available"}
 
 
 def run_web_server(host: str = "0.0.0.0", port: int = 8080):

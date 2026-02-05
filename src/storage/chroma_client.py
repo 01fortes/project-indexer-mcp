@@ -1,5 +1,6 @@
 """ChromaDB client wrapper for vector storage."""
 
+import asyncio
 import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -35,19 +36,22 @@ class ChromaManager:
             self.client = chromadb.PersistentClient(path=config.persist_directory)
             logger.info(f"Using local ChromaDB at {config.persist_directory}")
 
-    def get_or_create_collection(self, project_path: Path):
+    def get_or_create_collection(self, project_path: Path, collection_type: str = 'index'):
         """
         Get or create collection for project.
 
-        Collection name format: project_index_{project_hash}
+        Collection name format:
+        - 'index': project_index_{project_hash} (simple indexing)
+        - 'graph': project_graph_{project_hash} (call graph indexing)
 
         Args:
             project_path: Project root path.
+            collection_type: Type of collection ('index' or 'graph')
 
         Returns:
             ChromaDB collection.
         """
-        collection_name = self._get_collection_name(project_path)
+        collection_name = self._get_collection_name(project_path, collection_type)
 
         try:
             collection = self.client.get_collection(name=collection_name)
@@ -55,7 +59,10 @@ class ChromaManager:
         except:
             collection = self.client.create_collection(
                 name=collection_name,
-                metadata={"project_path": str(project_path)}
+                metadata={
+                    "project_path": str(project_path),
+                    "collection_type": collection_type
+                }
             )
             logger.info(f"Created new collection: {collection_name}")
 
@@ -64,14 +71,16 @@ class ChromaManager:
     async def add_documents(
         self,
         collection,
-        documents: List[IndexedDocument]
+        documents: List[IndexedDocument],
+        timeout: int = 60
     ) -> None:
         """
-        Add or update documents in collection.
+        Add or update documents in collection with timeout.
 
         Args:
             collection: ChromaDB collection.
             documents: List of IndexedDocument objects.
+            timeout: Operation timeout in seconds.
         """
         if not documents:
             return
@@ -82,13 +91,24 @@ class ChromaManager:
         metadatas = [doc.metadata for doc in documents]
 
         try:
-            collection.upsert(
-                ids=ids,
-                documents=contents,
-                embeddings=embeddings,
-                metadatas=metadatas
+            # Run upsert in executor with timeout
+            loop = asyncio.get_event_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: collection.upsert(
+                        ids=ids,
+                        documents=contents,
+                        embeddings=embeddings,
+                        metadatas=metadatas
+                    )
+                ),
+                timeout=timeout
             )
             logger.info(f"Added/updated {len(documents)} documents")
+        except asyncio.TimeoutError:
+            logger.error(f"ChromaDB upsert timed out after {timeout}s")
+            raise
         except Exception as e:
             logger.error(f"Failed to add documents: {e}")
             raise
@@ -222,14 +242,15 @@ class ChromaManager:
             logger.error(f"Search failed: {e}")
             raise
 
-    def delete_collection(self, project_path: Path) -> None:
+    def delete_collection(self, project_path: Path, collection_type: str = 'index') -> None:
         """
         Delete entire project collection.
 
         Args:
             project_path: Project root path.
+            collection_type: Type of collection ('index' or 'graph')
         """
-        collection_name = self._get_collection_name(project_path)
+        collection_name = self._get_collection_name(project_path, collection_type)
 
         try:
             self.client.delete_collection(name=collection_name)
@@ -237,17 +258,18 @@ class ChromaManager:
         except Exception as e:
             logger.warning(f"Failed to delete collection {collection_name}: {e}")
 
-    def get_project_stats(self, project_path: Path) -> Dict:
+    def get_project_stats(self, project_path: Path, collection_type: str = 'index') -> Dict:
         """
         Get statistics about indexed project.
 
         Args:
             project_path: Project root path.
+            collection_type: Type of collection ('index' or 'graph')
 
         Returns:
             Dictionary with stats.
         """
-        collection_name = self._get_collection_name(project_path)
+        collection_name = self._get_collection_name(project_path, collection_type)
 
         try:
             collection = self.client.get_collection(name=collection_name)
@@ -265,12 +287,13 @@ class ChromaManager:
                 "exists": False
             }
 
-    def _get_collection_name(self, project_path: Path) -> str:
+    def _get_collection_name(self, project_path: Path, collection_type: str = 'index') -> str:
         """
         Generate collection name from project path.
 
         Args:
             project_path: Project root path.
+            collection_type: Type of collection ('index' or 'graph')
 
         Returns:
             Collection name.
@@ -278,7 +301,7 @@ class ChromaManager:
         # Generate stable hash from absolute path
         normalized = str(project_path.resolve())
         hash_digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
-        return f"project_index_{hash_digest}"
+        return f"project_{collection_type}_{hash_digest}"
 
     def generate_document_id(self, project_path: Path, relative_path: Path, chunk_index: int) -> str:
         """
@@ -310,7 +333,8 @@ class ChromaManager:
 
             for collection in collections:
                 # Skip non-project collections
-                if not collection.name.startswith("project_index_"):
+                if not (collection.name.startswith("project_index_") or
+                        collection.name.startswith("project_graph_")):
                     continue
 
                 try:
@@ -318,13 +342,22 @@ class ChromaManager:
                     coll = self.client.get_collection(name=collection.name)
                     count = coll.count()
 
-                    # Try to get project context document
-                    project_hash = collection.name.replace("project_index_", "")
+                    # Extract project hash and collection type from name
+                    # Format: project_{type}_{hash}
+                    if collection.name.startswith("project_index_"):
+                        project_hash = collection.name.replace("project_index_", "")
+                        coll_type = "index"
+                    elif collection.name.startswith("project_graph_"):
+                        project_hash = collection.name.replace("project_graph_", "")
+                        coll_type = "graph"
+                    else:
+                        continue
                     context_id = f"{project_hash}:__project_context__:0"
 
                     project_info = {
                         "collection_name": collection.name,
                         "project_hash": project_hash,
+                        "collection_type": coll_type,
                         "total_documents": count,
                         "project_name": "Unknown",
                         "project_path": collection.metadata.get("project_path", "Unknown"),

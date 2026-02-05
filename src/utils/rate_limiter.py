@@ -48,8 +48,8 @@ class RateLimiter:
             tokens: Number of tokens (for TPM limit).
             request_count: Number of requests (for RPM limit).
         """
-        async with self.lock:
-            while True:
+        while True:
+            async with self.lock:
                 # Refill buckets based on elapsed time
                 now = time.time()
 
@@ -74,15 +74,16 @@ class RateLimiter:
                     # Consume tokens
                     self.request_tokens -= request_count
                     self.token_tokens -= tokens
-                    break
+                    return  # Exit successfully
 
                 # Calculate wait time
                 wait_time_requests = (request_count - self.request_tokens) / (self.rpm / 60.0)
                 wait_time_tokens = (tokens - self.token_tokens) / (self.tpm / 60.0)
                 wait_time = max(wait_time_requests, wait_time_tokens, 0.1)
 
-                logger.debug(f"Rate limit reached, waiting {wait_time:.2f}s")
-                await asyncio.sleep(wait_time)
+            # Sleep OUTSIDE the lock to avoid blocking other coroutines!
+            logger.debug(f"Rate limit reached, waiting {wait_time:.2f}s")
+            await asyncio.sleep(wait_time)
 
     async def execute_with_retry(
         self,

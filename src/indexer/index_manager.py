@@ -12,6 +12,7 @@ from ..indexer.chunker import chunk_code_file
 from ..indexer.context_analyzer import analyze_project_context
 from ..indexer.embedder import batch_generate_embeddings, prepare_embedding_text
 from ..indexer.scanner import scan_project
+from ..indexer.simple_checkpoint import SimpleCheckpoint
 from ..providers.base import LLMProvider, EmbeddingProvider
 from ..storage.chroma_client import ChromaManager
 from ..storage.models import IndexedDocument, ProjectContext
@@ -54,7 +55,9 @@ class IndexManager:
     async def index_project(
         self,
         project_path: Path,
-        force_reindex: bool = False
+        force_reindex: bool = False,
+        file_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None
     ) -> Dict:
         """
         Index entire project.
@@ -69,6 +72,8 @@ class IndexManager:
         Args:
             project_path: Path to project root.
             force_reindex: Force reindex even if already indexed.
+            file_patterns: Optional list of glob patterns to include (overrides config)
+            exclude_patterns: Optional list of glob patterns to exclude (adds to config)
 
         Returns:
             Dictionary with indexing results.
@@ -76,10 +81,34 @@ class IndexManager:
         start_time = time.time()
         logger.info(f"Starting indexing of {project_path}")
 
+        # Initialize checkpoint manager
+        checkpoint_dir = Path(self.config.chroma.persist_directory) / "checkpoints"
+        checkpoint = SimpleCheckpoint(checkpoint_dir)
+
+        # Check if resuming from previous run
+        checkpoint_stats = checkpoint.get_statistics(str(project_path))
+        is_resume = checkpoint_stats['completed'] > 0
+
+        # Clear checkpoints and ChromaDB if force_reindex
+        if force_reindex:
+            try:
+                logger.info("Force reindex: clearing ChromaDB index collection and checkpoints")
+                self.chroma.delete_collection(project_path, collection_type='index')
+                checkpoint.clear_project(str(project_path))
+                logger.info("✓ ChromaDB index collection and checkpoints cleared")
+                is_resume = False
+            except Exception as e:
+                logger.warning(f"Failed to clear ChromaDB index collection (may not exist yet): {e}")
+
+        if is_resume:
+            logger.info(f"Resuming indexing: {checkpoint_stats['completed']} files already completed")
+
         stats = {
             "total_files": 0,
             "indexed_files": 0,
             "failed_files": 0,
+            "skipped_files": 0,
+            "resumed": is_resume,
             "total_chunks": 0,
             "total_tokens": 0,
             "duration_seconds": 0,
@@ -108,18 +137,38 @@ class IndexManager:
 
             # Step 2: Scan files
             logger.info("Step 2: Scanning files")
+
+            # Use custom patterns if provided, otherwise use config
+            include_patterns = file_patterns if file_patterns else self.config.patterns.include
+            exclude_pats = list(self.config.patterns.exclude)  # Start with config excludes
+            if exclude_patterns:
+                exclude_pats.extend(exclude_patterns)  # Add custom excludes
+
+            logger.info(f"Include patterns: {include_patterns}")
+            logger.info(f"Exclude patterns: {exclude_pats}")
+
             file_metadatas = await scan_project(
                 project_path,
-                self.config.patterns.include,
-                self.config.patterns.exclude,
+                include_patterns,
+                exclude_pats,
                 max_file_size_mb=self.config.indexing.max_file_size_mb
             )
 
             stats["total_files"] = len(file_metadatas)
             logger.info(f"Found {stats['total_files']} files")
 
+            # Filter files that need indexing based on checkpoints
+            files_to_process = []
+            for file_meta in file_metadatas:
+                rel_path = str(file_meta.relative_path)
+                if checkpoint.should_reindex_file(str(project_path), rel_path, file_meta.hash):
+                    files_to_process.append(file_meta)
+                else:
+                    stats["skipped_files"] += 1
+
+            logger.info(f"Processing {len(files_to_process)} files (skipped {stats['skipped_files']} already indexed)")
+
             # Step 3-5: Process files (analyze, embed, store)
-            logger.info(f"Step 3-5: Processing {stats['total_files']} files...")
             indexed_docs = []
 
             # Process files with limited concurrency
@@ -135,16 +184,52 @@ class IndexManager:
                         async with progress_lock:
                             processed_count += 1
                             current = processed_count
-                        logger.info(f"[{current}/{stats['total_files']}] Processing: {file_meta.relative_path}")
+                        logger.info(f"[{current}/{len(files_to_process)}] Processing: {file_meta.relative_path}")
 
                         docs = await self._process_file(file_meta, project_path, project_context)
+
+                        # Mark file as completed in checkpoint
+                        checkpoint.mark_file_completed(
+                            str(project_path),
+                            str(file_meta.relative_path),
+                            file_meta.hash
+                        )
+
                         return docs, None
                     except Exception as e:
                         logger.error(f"✗ Failed: {file_meta.relative_path} - {e}")
+
+                        # Mark file as failed in checkpoint
+                        checkpoint.mark_file_completed(
+                            str(project_path),
+                            str(file_meta.relative_path),
+                            file_meta.hash,
+                            error=str(e)
+                        )
+
                         return [], str(e)
 
-            tasks = [process_file(fm) for fm in file_metadatas]
-            results = await asyncio.gather(*tasks)
+            # Process files in chunks to control memory
+            CHUNK_SIZE = 50
+            all_results = []
+
+            for chunk_start in range(0, len(files_to_process), CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, len(files_to_process))
+                chunk_files = files_to_process[chunk_start:chunk_end]
+
+                logger.info(f"Processing files {chunk_start+1}-{chunk_end}/{len(files_to_process)}")
+
+                tasks = [process_file(fm) for fm in chunk_files]
+                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for i, result in enumerate(chunk_results):
+                    if isinstance(result, Exception):
+                        logger.error(f"File processing exception: {result}")
+                        all_results.append(([], str(result)))
+                    else:
+                        all_results.append(result)
+
+            results = all_results
 
             for docs, error in results:
                 if docs:
@@ -186,6 +271,9 @@ class IndexManager:
                 "error": str(e),
                 "stats": stats
             }
+        finally:
+            # Always close checkpoint manager
+            checkpoint.close()
 
     async def _process_file(
         self,

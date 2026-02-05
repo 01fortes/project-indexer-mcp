@@ -25,7 +25,9 @@ class IndexingConfig:
     max_file_size_mb: float = 1.0
     max_chunk_size_tokens: int = 6000
     chunk_overlap_tokens: int = 500
-    max_concurrent_files: int = 5
+    max_concurrent_files: int = 10
+    max_concurrent_ast_parsing: int = 10
+    max_concurrent_llm_batches: int = 5  # For Pass 2 enrichment in EnhancedIndexer
     rate_limit_rpm: int = 3500  # Requests per minute
     rate_limit_tpm: int = 1000000  # Tokens per minute
 
@@ -90,16 +92,6 @@ class FilePatterns:
 
 
 @dataclass
-class CallGraphConfig:
-    """Call graph configuration."""
-
-    enabled: bool = True
-    db_path: str = "./call_graph.db"
-    max_call_depth: int = 10
-    resolve_cross_file: bool = True
-
-
-@dataclass
 class Config:
     """Main configuration container."""
 
@@ -108,7 +100,6 @@ class Config:
     server: ServerConfig
     patterns: FilePatterns
     provider: ProviderConfig
-    call_graph: CallGraphConfig
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -141,7 +132,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         max_file_size_mb=float(os.getenv("MAX_FILE_SIZE_MB", "1.0")),
         max_chunk_size_tokens=int(os.getenv("MAX_CHUNK_SIZE_TOKENS", "6000")),
         chunk_overlap_tokens=int(os.getenv("CHUNK_OVERLAP_TOKENS", "500")),
-        max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "5")),
+        max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "10")),
+        max_concurrent_ast_parsing=int(os.getenv("MAX_CONCURRENT_AST_PARSING", "10")),
+        max_concurrent_llm_batches=int(os.getenv("MAX_CONCURRENT_LLM_BATCHES", "5")),
         rate_limit_rpm=int(os.getenv("RATE_LIMIT_RPM", "3500")),
         rate_limit_tpm=int(os.getenv("RATE_LIMIT_TPM", "1000000")),
     )
@@ -215,16 +208,6 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         timeout=int(os.getenv("PROVIDER_TIMEOUT", "60"))
     )
 
-    # Call graph configuration
-    # Default: use same directory as ChromaDB
-    default_db_path = os.path.join(chroma_config.persist_directory, "call_graph.db")
-    call_graph_config = CallGraphConfig(
-        enabled=os.getenv("CALL_GRAPH_ENABLED", "true").lower() == "true",
-        db_path=os.getenv("CALL_GRAPH_DB_PATH", default_db_path),
-        max_call_depth=int(os.getenv("CALL_GRAPH_MAX_DEPTH", "10")),
-        resolve_cross_file=os.getenv("CALL_GRAPH_RESOLVE_CROSS_FILE", "true").lower() == "true"
-    )
-
     # Load file patterns from YAML if exists
     patterns = FilePatterns()
     if config_path is None:
@@ -247,5 +230,4 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         server=server_config,
         patterns=patterns,
         provider=provider_config,
-        call_graph=call_graph_config,
     )

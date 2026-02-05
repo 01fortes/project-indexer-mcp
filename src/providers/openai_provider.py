@@ -126,6 +126,17 @@ class OpenAILLMProvider(LLMProvider):
     def model_name(self) -> str:
         return self._model
 
+    async def close(self):
+        """Close the underlying httpx client."""
+        if self._client:
+            await self._client.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """
@@ -173,6 +184,17 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     @property
     def dimension(self) -> int:
         return self._dimensions.get(self._model, 1536)
+
+    async def close(self):
+        """Close the underlying httpx client."""
+        if self._client:
+            await self._client.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
 
 
 # Factory function moved to factory.py for better separation of concerns

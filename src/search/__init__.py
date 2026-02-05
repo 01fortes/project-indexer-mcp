@@ -1,5 +1,3 @@
-"""Search module for code flow analysis."""
+"""Search modules."""
 
-from .flow_searcher import FlowSearcher
-
-__all__ = ['FlowSearcher']
+__all__ = []
