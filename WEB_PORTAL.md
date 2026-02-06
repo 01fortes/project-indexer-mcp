@@ -108,19 +108,11 @@ GET /api/projects/{project_path}/files?limit=100&offset=0
 
 #### 5. Поиск в проекте
 ```bash
-POST /api/projects/{project_path}/search
-Content-Type: application/json
-
-{
-  "query": "authentication logic",
-  "n_results": 10,
-  "file_type": "code",
-  "language": "python"
-}
+GET /api/projects/{project_path}/search?query=authentication+logic&n_results=10&file_type=code&language=python
 ```
 Семантический поиск по коду.
 
-**Параметры:**
+**Параметры (query string):**
 - `query` - поисковый запрос (обязательный)
 - `n_results` - количество результатов (по умолчанию 10)
 - `file_type` - тип файла (optional): code, documentation, config, test
@@ -158,7 +150,33 @@ curl "http://localhost:8080/api/projects/%2Fpath%2Fto%2Fproject/files/src%2Fmain
 }
 ```
 
-#### 7. Удалить проект
+#### 7. Обновить индекс файлов
+```bash
+POST /api/projects/{project_path}/files/update
+Content-Type: application/json
+
+{
+  "file_paths": ["src/main.py", "src/utils.py"]
+}
+```
+Обновить индекс конкретных файлов в проекте.
+
+**Request body:**
+- `file_paths` - список относительных путей файлов для обновления (обязательный)
+
+**Response:**
+```json
+{
+  "status": "success",
+  "stats": {
+    "updated_files": 2,
+    "failed_files": 0,
+    "total_chunks": 5
+  }
+}
+```
+
+#### 8. Удалить проект
 ```bash
 DELETE /api/projects/{project_path}
 ```
@@ -231,13 +249,7 @@ curl http://localhost:8080/api/projects | jq
 
 ### Поиск функций аутентификации
 ```bash
-curl -X POST "http://localhost:8080/api/projects/%2Fpath%2Fto%2Fproject/search" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "authentication functions",
-    "n_results": 5,
-    "file_type": "code"
-  }' | jq
+curl "http://localhost:8080/api/projects/%2Fpath%2Fto%2Fproject/search?query=authentication+functions&n_results=5&file_type=code" | jq
 ```
 
 ### Получить список Python файлов

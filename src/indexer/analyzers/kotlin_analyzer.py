@@ -1,10 +1,11 @@
 """Kotlin-specific AST analyzer."""
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .base import BaseLanguageAnalyzer
 from ..ast_analyzer import CallGraph, FunctionDefinition, FunctionCall, ImportStatement
+from ...storage.models import ExtractedFunction
 from ...utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -278,3 +279,170 @@ class KotlinAnalyzer(BaseLanguageAnalyzer):
             if child.type == 'type':
                 return self.get_text(child, code_bytes)
         return None
+
+    def extract_functions(self, tree, code: str, file_path: Path) -> List[ExtractedFunction]:
+        """
+        Extract all functions from Kotlin code with full details.
+
+        Handles:
+        - Regular functions (fun)
+        - Suspend functions
+        - Class methods
+        - Extension functions
+        - Annotations
+
+        Args:
+            tree: Tree-sitter AST tree
+            code: Kotlin source code
+            file_path: Path to Kotlin file
+
+        Returns:
+            List of ExtractedFunction objects
+        """
+        functions = []
+        root_node = tree.root_node
+        code_bytes = bytes(code, "utf8")
+        code_lines = code.split('\n')
+
+        def get_function_code(start_line: int, end_line: int) -> str:
+            """Extract function source code from line numbers."""
+            return '\n'.join(code_lines[start_line:end_line + 1])
+
+        def extract_annotations(node) -> List[str]:
+            """Extract annotations from function or its modifiers."""
+            annotations = []
+
+            # Check modifiers
+            for child in node.children:
+                if child.type == 'modifiers':
+                    for mod in child.children:
+                        if mod.type == 'annotation':
+                            ann_text = self.get_text(mod, code_bytes)
+                            annotations.append(ann_text.lstrip('@').strip())
+
+            return annotations
+
+        def extract_kdoc(node) -> Optional[str]:
+            """Extract KDoc comment before function."""
+            # Look for preceding multiline_comment that starts with /**
+            prev = node.prev_sibling
+            while prev:
+                if prev.type == 'multiline_comment':
+                    comment = self.get_text(prev, code_bytes)
+                    if comment.startswith('/**'):
+                        # Clean up KDoc
+                        lines = comment.split('\n')
+                        cleaned = []
+                        for line in lines:
+                            line = line.strip()
+                            line = line.lstrip('/*').rstrip('*/').strip()
+                            if line.startswith('*'):
+                                line = line[1:].strip()
+                            if line:
+                                cleaned.append(line)
+                        return '\n'.join(cleaned) if cleaned else None
+                    break
+                elif prev.type not in ('line_comment', 'multiline_comment'):
+                    break
+                prev = prev.prev_sibling
+            return None
+
+        def extract_parameters(node) -> List[str]:
+            """Extract parameter names from function declaration."""
+            params = []
+            for child in node.children:
+                if child.type == 'function_value_parameters':
+                    for param in child.children:
+                        if param.type == 'parameter':
+                            for sub in param.children:
+                                if sub.type == 'simple_identifier':
+                                    params.append(self.get_text(sub, code_bytes))
+                                    break
+            return params
+
+        def traverse(node, current_class=None):
+            """Recursively traverse AST and extract functions."""
+
+            # Handle class declarations
+            if node.type == 'class_declaration':
+                class_name = None
+                for child in node.children:
+                    if child.type == 'simple_identifier':
+                        class_name = self.get_text(child, code_bytes)
+                        break
+
+                for child in node.children:
+                    traverse(child, current_class=class_name)
+                return
+
+            # Handle function declarations
+            if node.type == 'function_declaration':
+                extract_function(node, current_class)
+
+            # Continue traversal
+            for child in node.children:
+                traverse(child, current_class)
+
+        def extract_function(node, current_class):
+            """Extract a single function definition."""
+            func_name = self.extract_function_name(node, code_bytes)
+
+            if not func_name:
+                return
+
+            # Get line numbers
+            start_line = node.start_point[0]
+            end_line = node.end_point[0]
+
+            # Check for preceding annotations/modifiers
+            prev = node.prev_sibling
+            while prev and prev.type in ('modifiers', 'annotation'):
+                start_line = prev.start_point[0]
+                prev = prev.prev_sibling
+
+            # Extract parameters
+            params = extract_parameters(node)
+
+            # Check if suspend function
+            is_async = False
+            for child in node.children:
+                if child.type == 'modifiers':
+                    mod_text = self.get_text(child, code_bytes)
+                    if 'suspend' in mod_text:
+                        is_async = True
+                        break
+
+            # Get annotations
+            annotations = extract_annotations(node)
+
+            # Get KDoc
+            docstring = extract_kdoc(node)
+
+            # Get return type
+            return_type = self._extract_return_type(node, code_bytes)
+
+            # Get full function code
+            func_code = get_function_code(start_line, end_line)
+
+            extracted = ExtractedFunction(
+                name=func_name,
+                file_path=str(file_path),
+                line_start=start_line + 1,  # 1-indexed
+                line_end=end_line + 1,
+                code=func_code,
+                parameters=params,
+                return_type=return_type,
+                is_async=is_async,
+                is_method=current_class is not None,
+                class_name=current_class,
+                decorators=annotations,  # Kotlin annotations as decorators
+                docstring=docstring
+            )
+
+            functions.append(extracted)
+
+        # Start traversal
+        traverse(root_node)
+
+        logger.debug(f"Kotlin extractor: found {len(functions)} functions in {file_path}")
+        return functions

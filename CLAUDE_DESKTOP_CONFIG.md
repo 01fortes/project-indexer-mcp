@@ -16,11 +16,8 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
     "project-indexer": {
-      "command": "/Volumes/LaCie/mcp/project-scanner/venv/bin/python",
-      "args": ["/Volumes/LaCie/mcp/project-scanner/run_server.py"],
-      "env": {
-        "OPENAI_API_KEY": "sk-ваш-настоящий-api-ключ-здесь"
-      }
+      "command": "/path/to/project/venv/bin/python",
+      "args": ["/path/to/project/run_server.py"]
     }
   }
 }

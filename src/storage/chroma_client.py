@@ -41,12 +41,15 @@ class ChromaManager:
         Get or create collection for project.
 
         Collection name format:
-        - 'index': project_index_{project_hash} (simple indexing)
+        - 'index': project_index_{project_hash} (legacy/backward compatible)
         - 'graph': project_graph_{project_hash} (call graph indexing)
+        - 'analysis': project_analysis_{project_hash} (Index 1 - project analysis)
+        - 'files': project_files_{project_hash} (Index 2 - file indexing)
+        - 'functions': project_functions_{project_hash} (Index 3 - function indexing)
 
         Args:
             project_path: Project root path.
-            collection_type: Type of collection ('index' or 'graph')
+            collection_type: Type of collection ('index', 'graph', 'analysis', 'files', 'functions')
 
         Returns:
             ChromaDB collection.
@@ -248,7 +251,7 @@ class ChromaManager:
 
         Args:
             project_path: Project root path.
-            collection_type: Type of collection ('index' or 'graph')
+            collection_type: Type of collection ('index', 'graph', 'analysis', 'files', 'functions')
         """
         collection_name = self._get_collection_name(project_path, collection_type)
 
@@ -264,7 +267,7 @@ class ChromaManager:
 
         Args:
             project_path: Project root path.
-            collection_type: Type of collection ('index' or 'graph')
+            collection_type: Type of collection ('index', 'graph', 'analysis', 'files', 'functions')
 
         Returns:
             Dictionary with stats.
@@ -293,7 +296,7 @@ class ChromaManager:
 
         Args:
             project_path: Project root path.
-            collection_type: Type of collection ('index' or 'graph')
+            collection_type: Type of collection ('index', 'graph', 'analysis', 'files', 'functions')
 
         Returns:
             Collection name.
@@ -302,6 +305,41 @@ class ChromaManager:
         normalized = str(project_path.resolve())
         hash_digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
         return f"project_{collection_type}_{hash_digest}"
+
+    def delete_all_project_collections(self, project_path: Path) -> Dict[str, bool]:
+        """
+        Delete all collections for a project across all types.
+
+        Args:
+            project_path: Project root path.
+
+        Returns:
+            Dictionary mapping collection_type to success status.
+        """
+        results = {}
+        for coll_type in ['index', 'graph', 'analysis', 'files', 'functions']:
+            try:
+                self.delete_collection(project_path, coll_type)
+                results[coll_type] = True
+            except Exception as e:
+                logger.warning(f"Failed to delete {coll_type} collection for {project_path}: {e}")
+                results[coll_type] = False
+        return results
+
+    def get_all_project_stats(self, project_path: Path) -> Dict[str, Dict]:
+        """
+        Get statistics for all collection types for a project.
+
+        Args:
+            project_path: Project root path.
+
+        Returns:
+            Dictionary mapping collection_type to stats.
+        """
+        stats = {}
+        for coll_type in ['index', 'analysis', 'files', 'functions']:
+            stats[coll_type] = self.get_project_stats(project_path, coll_type)
+        return stats
 
     def generate_document_id(self, project_path: Path, relative_path: Path, chunk_index: int) -> str:
         """
@@ -333,8 +371,11 @@ class ChromaManager:
 
             for collection in collections:
                 # Skip non-project collections
-                if not (collection.name.startswith("project_index_") or
-                        collection.name.startswith("project_graph_")):
+                prefixes = [
+                    "project_index_", "project_graph_",
+                    "project_analysis_", "project_files_", "project_functions_"
+                ]
+                if not any(collection.name.startswith(p) for p in prefixes):
                     continue
 
                 try:
@@ -344,13 +385,16 @@ class ChromaManager:
 
                     # Extract project hash and collection type from name
                     # Format: project_{type}_{hash}
-                    if collection.name.startswith("project_index_"):
-                        project_hash = collection.name.replace("project_index_", "")
-                        coll_type = "index"
-                    elif collection.name.startswith("project_graph_"):
-                        project_hash = collection.name.replace("project_graph_", "")
-                        coll_type = "graph"
-                    else:
+                    coll_type = None
+                    project_hash = None
+                    for prefix in ["index", "graph", "analysis", "files", "functions"]:
+                        full_prefix = f"project_{prefix}_"
+                        if collection.name.startswith(full_prefix):
+                            project_hash = collection.name.replace(full_prefix, "")
+                            coll_type = prefix
+                            break
+
+                    if not coll_type or not project_hash:
                         continue
                     context_id = f"{project_hash}:__project_context__:0"
 

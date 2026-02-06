@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Analysis - Project Indexer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="app" class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b">
+            <div class="container mx-auto px-4 py-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h1 class="text-3xl font-bold text-gray-900">Project Analysis</h1>
+                        <p class="text-gray-600 mt-1">Iterative project understanding with confidence scores (Index 1)</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <a href="/" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition">
+                            Back to Projects
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="container mx-auto px-4 py-8">
+            <!-- Project Selector -->
+            <div class="bg-white rounded-lg shadow mb-6 p-6">
+                <div class="flex gap-4 items-end">
+                    <div class="flex-1">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Project Path</label>
+                        <input
+                            v-model="projectPath"
+                            type="text"
+                            placeholder="/path/to/project"
+                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            @keyup.enter="loadAnalysis"
+                        />
+                    </div>
+                    <button
+                        @click="loadAnalysis"
+                        :disabled="!projectPath || loading"
+                        class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <span v-if="loading">Loading...</span>
+                        <span v-else>Load Analysis</span>
+                    </button>
+                    <button
+                        @click="startAnalysis(false)"
+                        :disabled="!projectPath || analyzing"
+                        class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <span v-if="analyzing" class="animate-pulse">Analyzing...</span>
+                        <span v-else>Start Analysis</span>
+                    </button>
+                    <button
+                        @click="startAnalysis(true)"
+                        :disabled="!projectPath || analyzing"
+                        class="px-6 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Force re-analyze from scratch"
+                    >
+                        Force Reindex
+                    </button>
+                </div>
+            </div>
+
+            <!-- Analysis Not Found -->
+            <div v-if="notFound" class="bg-yellow-50 border border-yellow-200 rounded-lg p-8 text-center">
+                <div class="text-5xl mb-4">🔍</div>
+                <h3 class="text-xl font-semibold text-yellow-800 mb-2">No Analysis Found</h3>
+                <p class="text-yellow-700">This project hasn't been analyzed yet. Click "Start Analysis" to begin.</p>
+            </div>
+
+            <!-- Analysis Results -->
+            <div v-if="analysis" class="space-y-6">
+                <!-- Status Card -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-xl font-semibold text-gray-800">Analysis Status</h2>
+                        <span
+                            :class="analysis.completed ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'"
+                            class="px-3 py-1 rounded-full text-sm font-medium"
+                        >
+                            {{ analysis.completed ? 'Completed' : 'In Progress' }}
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <div class="bg-gray-50 rounded-lg p-4">
+                            <div class="text-sm text-gray-600">Iterations</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ analysis.iteration_count }}</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-lg p-4">
+                            <div class="text-sm text-gray-600">Files Analyzed</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ analysis.total_files_analyzed }}</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-lg p-4">
+                            <div class="text-sm text-gray-600">Min Confidence</div>
+                            <div class="text-2xl font-bold" :class="getConfidenceColor(minConfidence)">
+                                {{ minConfidence }}%
+                            </div>
+                        </div>
+                        <div class="bg-gray-50 rounded-lg p-4">
+                            <div class="text-sm text-gray-600">Avg Confidence</div>
+                            <div class="text-2xl font-bold" :class="getConfidenceColor(avgConfidence)">
+                                {{ avgConfidence }}%
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Analysis Fields -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Project Description -->
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold text-gray-800">Project Description</h3>
+                            <span
+                                :class="getConfidenceBadgeClass(analysis.project_description_confidence)"
+                                class="px-2 py-1 rounded text-xs font-medium"
+                            >
+                                {{ analysis.project_description_confidence }}%
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                            <div
+                                class="h-2 rounded-full transition-all"
+                                :class="getConfidenceBarClass(analysis.project_description_confidence)"
+                                :style="{ width: analysis.project_description_confidence + '%' }"
+                            ></div>
+                        </div>
+                        <p class="text-gray-700">{{ analysis.project_description || 'Not determined yet' }}</p>
+                    </div>
+
+                    <!-- Architecture -->
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold text-gray-800">Architecture</h3>
+                            <span
+                                :class="getConfidenceBadgeClass(analysis.architecture_confidence)"
+                                class="px-2 py-1 rounded text-xs font-medium"
+                            >
+                                {{ analysis.architecture_confidence }}%
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                            <div
+                                class="h-2 rounded-full transition-all"
+                                :class="getConfidenceBarClass(analysis.architecture_confidence)"
+                                :style="{ width: analysis.architecture_confidence + '%' }"
+                            ></div>
+                        </div>
+                        <p class="text-gray-700">{{ analysis.architecture || 'Not determined yet' }}</p>
+                    </div>
+
+                    <!-- Languages -->
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold text-gray-800">Languages</h3>
+                            <span
+                                :class="getConfidenceBadgeClass(analysis.languages_confidence)"
+                                class="px-2 py-1 rounded text-xs font-medium"
+                            >
+                                {{ analysis.languages_confidence }}%
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                            <div
+                                class="h-2 rounded-full transition-all"
+                                :class="getConfidenceBarClass(analysis.languages_confidence)"
+                                :style="{ width: analysis.languages_confidence + '%' }"
+                            ></div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <span
+                                v-for="lang in parseArray(analysis.languages)"
+                                :key="lang"
+                                class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm"
+                            >
+                                {{ lang }}
+                            </span>
+                            <span v-if="!parseArray(analysis.languages).length" class="text-gray-500">
+                                Not determined yet
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Frameworks -->
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold text-gray-800">Frameworks</h3>
+                            <span
+                                :class="getConfidenceBadgeClass(analysis.frameworks_confidence)"
+                                class="px-2 py-1 rounded text-xs font-medium"
+                            >
+                                {{ analysis.frameworks_confidence }}%
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                            <div
+                                class="h-2 rounded-full transition-all"
+                                :class="getConfidenceBarClass(analysis.frameworks_confidence)"
+                                :style="{ width: analysis.frameworks_confidence + '%' }"
+                            ></div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <span
+                                v-for="fw in parseArray(analysis.frameworks)"
+                                :key="fw"
+                                class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm"
+                            >
+                                {{ fw }}
+                            </span>
+                            <span v-if="!parseArray(analysis.frameworks).length" class="text-gray-500">
+                                Not determined yet
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Modules -->
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold text-gray-800">Modules</h3>
+                            <span
+                                :class="getConfidenceBadgeClass(analysis.modules_confidence)"
+                                class="px-2 py-1 rounded text-xs font-medium"
+                            >
+                                {{ analysis.modules_confidence }}%
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                            <div
+                                class="h-2 rounded-full transition-all"
+                                :class="getConfidenceBarClass(analysis.modules_confidence)"
+                                :style="{ width: analysis.modules_confidence + '%' }"
+                            ></div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <span
+                                v-for="mod in parseArray(analysis.modules)"
+                                :key="mod"
+                                class="px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm"
+                            >
+                                {{ mod }}
+                            </span>
+                            <span v-if="!parseArray(analysis.modules).length" class="text-gray-500">
+                                Not determined yet
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Entry Points -->
+                    <div class="bg-white rounded-lg shadow p-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold text-gray-800">Entry Points</h3>
+                            <span
+                                :class="getConfidenceBadgeClass(analysis.entry_points_confidence)"
+                                class="px-2 py-1 rounded text-xs font-medium"
+                            >
+                                {{ analysis.entry_points_confidence }}%
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+                            <div
+                                class="h-2 rounded-full transition-all"
+                                :class="getConfidenceBarClass(analysis.entry_points_confidence)"
+                                :style="{ width: analysis.entry_points_confidence + '%' }"
+                            ></div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <span
+                                v-for="ep in parseArray(analysis.entry_points)"
+                                :key="ep"
+                                class="px-3 py-1 bg-orange-100 text-orange-800 rounded-full text-sm font-mono text-xs"
+                            >
+                                {{ ep }}
+                            </span>
+                            <span v-if="!parseArray(analysis.entry_points).length" class="text-gray-500">
+                                Not determined yet
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Files Analyzed -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-gray-800">Files Analyzed</h3>
+                        <button
+                            @click="showAllFiles = !showAllFiles"
+                            class="text-blue-600 hover:text-blue-800 text-sm"
+                        >
+                            {{ showAllFiles ? 'Show Less' : 'Show All' }}
+                        </button>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <span
+                            v-for="file in displayedFiles"
+                            :key="file"
+                            class="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-mono"
+                        >
+                            {{ file }}
+                        </span>
+                        <span v-if="!showAllFiles && hiddenFilesCount > 0" class="text-gray-500 text-sm">
+                            +{{ hiddenFilesCount }} more files
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Iterations History -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="p-6 border-b border-gray-200">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-semibold text-gray-800">Iteration History</h3>
+                            <button
+                                @click="loadIterations"
+                                :disabled="loadingIterations"
+                                class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition disabled:opacity-50"
+                            >
+                                <span v-if="loadingIterations">Loading...</span>
+                                <span v-else>Load History</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="iterations.length > 0" class="divide-y divide-gray-200">
+                        <div
+                            v-for="iteration in iterations"
+                            :key="iteration.iteration"
+                            class="p-4 hover:bg-gray-50"
+                        >
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-semibold text-gray-800">Iteration {{ iteration.iteration }}</span>
+                                <span class="text-sm text-gray-500">{{ formatDate(iteration.created_at) }}</span>
+                            </div>
+                            <div class="text-sm text-gray-600">
+                                <span class="font-medium">Files requested:</span>
+                                {{ parseArray(iteration.files_requested).length }}
+                                |
+                                <span class="font-medium">Files read:</span>
+                                {{ parseArray(iteration.files_read).length }}
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else class="p-8 text-center text-gray-500">
+                        No iteration history loaded. Click "Load History" to view.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading State -->
+            <div v-if="loading" class="flex justify-center items-center py-16">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+            </div>
+        </main>
+
+        <!-- Notification Toast -->
+        <div v-if="notification.show" class="fixed top-4 right-4 z-50 animate-fade-in">
+            <div
+                :class="notification.type === 'success' ? 'bg-green-600' : notification.type === 'error' ? 'bg-red-600' : 'bg-blue-600'"
+                class="text-white px-6 py-4 rounded-lg shadow-lg max-w-md"
+            >
+                <div class="flex items-center gap-3">
+                    <span class="text-2xl">
+                        {{ notification.type === 'success' ? '✅' : notification.type === 'error' ? '❌' : 'ℹ️' }}
+                    </span>
+                    <div class="flex-1">
+                        <div class="font-semibold">{{ notification.title }}</div>
+                        <div v-if="notification.message" class="text-sm opacity-90 mt-1">{{ notification.message }}</div>
+                    </div>
+                    <button @click="notification.show = false" class="text-white opacity-75 hover:opacity-100">×</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    projectPath: '',
+                    analysis: null,
+                    iterations: [],
+                    loading: false,
+                    loadingIterations: false,
+                    analyzing: false,
+                    notFound: false,
+                    showAllFiles: false,
+                    notification: {
+                        show: false,
+                        type: 'info',
+                        title: '',
+                        message: ''
+                    }
+                };
+            },
+            computed: {
+                minConfidence() {
+                    if (!this.analysis) return 0;
+                    const confidences = [
+                        this.analysis.project_description_confidence || 0,
+                        this.analysis.languages_confidence || 0,
+                        this.analysis.frameworks_confidence || 0,
+                        this.analysis.modules_confidence || 0,
+                        this.analysis.entry_points_confidence || 0,
+                        this.analysis.architecture_confidence || 0
+                    ];
+                    return Math.min(...confidences);
+                },
+                avgConfidence() {
+                    if (!this.analysis) return 0;
+                    const confidences = [
+                        this.analysis.project_description_confidence || 0,
+                        this.analysis.languages_confidence || 0,
+                        this.analysis.frameworks_confidence || 0,
+                        this.analysis.modules_confidence || 0,
+                        this.analysis.entry_points_confidence || 0,
+                        this.analysis.architecture_confidence || 0
+                    ];
+                    return Math.round(confidences.reduce((a, b) => a + b, 0) / confidences.length);
+                },
+                allFiles() {
+                    return this.parseArray(this.analysis?.files_analyzed);
+                },
+                displayedFiles() {
+                    if (this.showAllFiles) return this.allFiles;
+                    return this.allFiles.slice(0, 10);
+                },
+                hiddenFilesCount() {
+                    return Math.max(0, this.allFiles.length - 10);
+                }
+            },
+            mounted() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const projectPath = urlParams.get('project');
+                if (projectPath) {
+                    this.projectPath = projectPath;
+                    this.loadAnalysis();
+                }
+            },
+            methods: {
+                parseArray(value) {
+                    if (!value) return [];
+                    if (Array.isArray(value)) return value;
+                    try {
+                        const parsed = JSON.parse(value);
+                        return Array.isArray(parsed) ? parsed : [];
+                    } catch {
+                        return [];
+                    }
+                },
+                async loadAnalysis() {
+                    if (!this.projectPath) return;
+
+                    this.loading = true;
+                    this.notFound = false;
+                    this.analysis = null;
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.projectPath);
+                        const response = await fetch(`/api/projects/${encodedPath}/analysis`);
+                        const data = await response.json();
+
+                        if (data.status === 'success' && data.analysis) {
+                            // Map API response to expected format
+                            const apiAnalysis = data.analysis;
+                            this.analysis = {
+                                completed: data.completed,
+                                iteration_count: data.iteration_count,
+                                total_files_analyzed: data.files_analyzed?.length || 0,
+                                files_analyzed: data.files_analyzed || [],
+                                // Map description -> project_description
+                                project_description: apiAnalysis.description,
+                                project_description_confidence: apiAnalysis.description_confidence || 0,
+                                languages: apiAnalysis.languages,
+                                languages_confidence: apiAnalysis.languages_confidence || 0,
+                                frameworks: apiAnalysis.frameworks,
+                                frameworks_confidence: apiAnalysis.frameworks_confidence || 0,
+                                modules: apiAnalysis.modules,
+                                modules_confidence: apiAnalysis.modules_confidence || 0,
+                                entry_points: apiAnalysis.entry_points,
+                                entry_points_confidence: apiAnalysis.entry_points_confidence || 0,
+                                architecture: apiAnalysis.architecture,
+                                architecture_confidence: apiAnalysis.architecture_confidence || 0
+                            };
+                        } else {
+                            this.notFound = true;
+                        }
+                    } catch (error) {
+                        console.error('Failed to load analysis:', error);
+                        this.showNotification('error', 'Error', 'Failed to load analysis');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                async startAnalysis(forceReindex) {
+                    if (!this.projectPath) return;
+
+                    this.analyzing = true;
+                    this.notFound = false;
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.projectPath);
+                        const response = await fetch(`/api/projects/${encodedPath}/analysis/start`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ force_reindex: forceReindex })
+                        });
+                        const data = await response.json();
+
+                        if (data.status === 'success' || data.status === 'partial') {
+                            const msg = data.completed ? 'Complete' : 'Partial';
+                            this.showNotification('success', `Analysis ${msg}`, `Completed in ${data.iteration_count} iterations, min confidence: ${data.min_confidence}%`);
+                            // Reload analysis to get full data
+                            await this.loadAnalysis();
+                        } else {
+                            this.showNotification('error', 'Analysis Failed', data.error || 'Unknown error');
+                        }
+                    } catch (error) {
+                        console.error('Failed to start analysis:', error);
+                        this.showNotification('error', 'Error', 'Failed to start analysis');
+                    } finally {
+                        this.analyzing = false;
+                    }
+                },
+                async loadIterations() {
+                    if (!this.projectPath) return;
+
+                    this.loadingIterations = true;
+
+                    try {
+                        const encodedPath = encodeURIComponent(this.projectPath);
+                        const response = await fetch(`/api/projects/${encodedPath}/analysis/iterations`);
+                        const data = await response.json();
+
+                        if (data.status === 'success') {
+                            this.iterations = data.iterations || [];
+                        }
+                    } catch (error) {
+                        console.error('Failed to load iterations:', error);
+                        this.showNotification('error', 'Error', 'Failed to load iteration history');
+                    } finally {
+                        this.loadingIterations = false;
+                    }
+                },
+                getConfidenceColor(confidence) {
+                    if (confidence >= 90) return 'text-green-600';
+                    if (confidence >= 70) return 'text-yellow-600';
+                    return 'text-red-600';
+                },
+                getConfidenceBadgeClass(confidence) {
+                    if (confidence >= 90) return 'bg-green-100 text-green-800';
+                    if (confidence >= 70) return 'bg-yellow-100 text-yellow-800';
+                    return 'bg-red-100 text-red-800';
+                },
+                getConfidenceBarClass(confidence) {
+                    if (confidence >= 90) return 'bg-green-500';
+                    if (confidence >= 70) return 'bg-yellow-500';
+                    return 'bg-red-500';
+                },
+                formatDate(timestamp) {
+                    if (!timestamp) return 'Unknown';
+                    const date = new Date(timestamp);
+                    return date.toLocaleString('ru-RU');
+                },
+                showNotification(type, title, message = '') {
+                    this.notification = { show: true, type, title, message };
+                    setTimeout(() => {
+                        this.notification.show = false;
+                    }, 5000);
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

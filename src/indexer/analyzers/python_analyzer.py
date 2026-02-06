@@ -1,10 +1,11 @@
 """Python-specific AST analyzer."""
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .base import BaseLanguageAnalyzer
 from ..ast_analyzer import CallGraph, FunctionDefinition, FunctionCall, ImportStatement
+from ...storage.models import ExtractedFunction
 from ...utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -221,3 +222,179 @@ class PythonAnalyzer(BaseLanguageAnalyzer):
                 return ImportStatement(module=module_name, imported_names=imported_names, alias=None)
 
         return None
+
+    def extract_functions(self, tree, code: str, file_path: Path) -> List[ExtractedFunction]:
+        """
+        Extract all functions from Python code with full details.
+
+        Handles:
+        - Regular functions (def)
+        - Async functions (async def)
+        - Class methods
+        - Decorators
+        - Docstrings
+
+        Args:
+            tree: Tree-sitter AST tree
+            code: Python source code
+            file_path: Path to Python file
+
+        Returns:
+            List of ExtractedFunction objects
+        """
+        functions = []
+        root_node = tree.root_node
+        code_bytes = bytes(code, "utf8")
+        code_lines = code.split('\n')
+
+        def get_function_code(start_line: int, end_line: int) -> str:
+            """Extract function source code from line numbers."""
+            return '\n'.join(code_lines[start_line:end_line + 1])
+
+        def extract_decorators(node) -> List[str]:
+            """Extract decorators from function node or its decorated_definition parent."""
+            decorators = []
+
+            # Check if parent is decorated_definition
+            if node.parent and node.parent.type == 'decorated_definition':
+                for child in node.parent.children:
+                    if child.type == 'decorator':
+                        dec_text = self.get_text(child, code_bytes)
+                        # Remove @ and newlines
+                        dec_text = dec_text.strip().lstrip('@').strip()
+                        decorators.append(dec_text)
+
+            return decorators
+
+        def extract_docstring(node) -> Optional[str]:
+            """Extract docstring from function body."""
+            body = node.child_by_field_name('body')
+            if body:
+                for child in body.children:
+                    if child.type == 'expression_statement':
+                        for sub in child.children:
+                            if sub.type == 'string':
+                                doc = self.get_text(sub, code_bytes)
+                                # Clean up triple quotes
+                                doc = doc.strip()
+                                for quote in ['"""', "'''"]:
+                                    if doc.startswith(quote) and doc.endswith(quote):
+                                        doc = doc[3:-3].strip()
+                                        break
+                                return doc
+                        break  # Only check first statement
+            return None
+
+        def extract_return_type(node) -> Optional[str]:
+            """Extract return type annotation."""
+            return_type = node.child_by_field_name('return_type')
+            if return_type:
+                return self.get_text(return_type, code_bytes)
+            return None
+
+        def traverse(node, current_class=None):
+            """Recursively traverse AST and extract functions."""
+
+            # Handle class definitions
+            if node.type == 'class_definition':
+                class_name = None
+                for child in node.children:
+                    if child.type == 'identifier':
+                        class_name = self.get_text(child, code_bytes)
+                        break
+
+                for child in node.children:
+                    traverse(child, current_class=class_name)
+                return
+
+            # Handle decorated definitions
+            if node.type == 'decorated_definition':
+                for child in node.children:
+                    if child.type == 'function_definition':
+                        # Process the function with decorators
+                        extract_function(child, current_class, node)
+                return
+
+            # Handle function definitions
+            if node.type == 'function_definition':
+                extract_function(node, current_class, None)
+                return
+
+            # Continue traversal
+            for child in node.children:
+                traverse(child, current_class)
+
+        def extract_function(node, current_class, decorated_parent):
+            """Extract a single function definition."""
+            func_name = None
+            for child in node.children:
+                if child.type == 'identifier':
+                    func_name = self.get_text(child, code_bytes)
+                    break
+
+            if not func_name:
+                return
+
+            # Get line numbers
+            if decorated_parent:
+                # Include decorator lines
+                start_line = decorated_parent.start_point[0]
+            else:
+                start_line = node.start_point[0]
+            end_line = node.end_point[0]
+
+            # Extract parameters
+            params = []
+            params_node = node.child_by_field_name('parameters')
+            if params_node:
+                for child in params_node.named_children:
+                    if child.type == 'identifier':
+                        params.append(self.get_text(child, code_bytes))
+                    elif child.type in ('typed_parameter', 'typed_default_parameter', 'default_parameter'):
+                        # Get the parameter name
+                        for sub in child.children:
+                            if sub.type == 'identifier':
+                                params.append(self.get_text(sub, code_bytes))
+                                break
+
+            # Check if async
+            is_async = any(child.type == 'async' for child in node.children)
+
+            # Get decorators
+            decorators = extract_decorators(node)
+
+            # Get docstring
+            docstring = extract_docstring(node)
+
+            # Get return type
+            return_type = extract_return_type(node)
+
+            # Get full function code
+            func_code = get_function_code(start_line, end_line)
+
+            extracted = ExtractedFunction(
+                name=func_name,
+                file_path=str(file_path),
+                line_start=start_line + 1,  # 1-indexed
+                line_end=end_line + 1,
+                code=func_code,
+                parameters=params,
+                return_type=return_type,
+                is_async=is_async,
+                is_method=current_class is not None,
+                class_name=current_class,
+                decorators=decorators,
+                docstring=docstring
+            )
+
+            functions.append(extracted)
+
+            # Also traverse into nested functions
+            for child in node.children:
+                traverse(child, None)
+
+        # Start traversal
+        traverse(root_node)
+
+        logger.debug(f"Python extractor: found {len(functions)} functions in {file_path}")
+        return functions

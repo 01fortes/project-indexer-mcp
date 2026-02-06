@@ -15,7 +15,7 @@ class ChromaConfig:
 
     host: Optional[str] = None
     port: Optional[int] = None
-    persist_directory: str = "./chroma_data"
+    persist_directory: str = "./chroma_data_new"
 
 
 @dataclass
@@ -26,6 +26,7 @@ class IndexingConfig:
     max_chunk_size_tokens: int = 6000
     chunk_overlap_tokens: int = 500
     max_concurrent_files: int = 10
+    max_concurrent_functions: int = 5  # Parallel function analysis per file
     max_concurrent_ast_parsing: int = 10
     max_concurrent_llm_batches: int = 5  # For Pass 2 enrichment in EnhancedIndexer
     rate_limit_rpm: int = 3500  # Requests per minute
@@ -133,6 +134,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         max_chunk_size_tokens=int(os.getenv("MAX_CHUNK_SIZE_TOKENS", "6000")),
         chunk_overlap_tokens=int(os.getenv("CHUNK_OVERLAP_TOKENS", "500")),
         max_concurrent_files=int(os.getenv("MAX_CONCURRENT_FILES", "10")),
+        max_concurrent_functions=int(os.getenv("MAX_CONCURRENT_FUNCTIONS", "5")),
         max_concurrent_ast_parsing=int(os.getenv("MAX_CONCURRENT_AST_PARSING", "10")),
         max_concurrent_llm_batches=int(os.getenv("MAX_CONCURRENT_LLM_BATCHES", "5")),
         rate_limit_rpm=int(os.getenv("RATE_LIMIT_RPM", "3500")),

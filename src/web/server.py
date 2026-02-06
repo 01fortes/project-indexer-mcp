@@ -10,7 +10,12 @@ import uvicorn
 
 from ..config import load_config
 from ..storage.chroma_client import ChromaManager
-from ..indexer.index_manager import IndexManager
+from ..storage.checkpoint_manager import CheckpointManager
+from ..storage.analysis_repository import AnalysisRepository
+from ..indexer.iterative_analyzer import IterativeProjectAnalyzer
+from ..indexer.file_index_manager import FileIndexManager
+from ..indexer.function_index_manager import FunctionIndexManager
+from ..indexer.scanner import scan_project
 from ..providers import create_providers_from_config
 from ..utils.logger import setup_logger
 from ..utils.rate_limiter import RateLimiter
@@ -34,14 +39,21 @@ app.add_middleware(
 # Global state
 config = None
 chroma = None
-indexer = None
+checkpoint_manager = None
+analysis_repo = None
+iterative_analyzer = None
+file_index_manager = None
+function_index_manager = None
+graph_store = None  # Legacy call graph storage (optional)
 logger = None
 
 
 @app.on_event("startup")
 async def startup():
     """Initialize components on startup."""
-    global config, chroma, indexer, logger
+    global config, chroma, logger
+    global checkpoint_manager, analysis_repo
+    global iterative_analyzer, file_index_manager, function_index_manager
 
     config = load_config()
     logger = setup_logger("web", config.server.log_level)
@@ -59,10 +71,135 @@ async def startup():
         tpm=config.indexing.rate_limit_tpm
     )
 
-    # Initialize IndexManager
-    indexer = IndexManager(config, chroma, llm_provider, embedding_provider, rate_limiter)
+    # Initialize unified checkpoint manager
+    checkpoint_dir = Path(config.chroma.persist_directory) / "checkpoints"
+    checkpoint_manager = CheckpointManager(checkpoint_dir)
 
-    logger.info("Web admin portal initialized")
+    # Initialize analysis repository
+    analysis_repo = AnalysisRepository(checkpoint_manager)
+
+    # Initialize iterative analyzer (Index 1)
+    iterative_analyzer = IterativeProjectAnalyzer(
+        llm_provider, analysis_repo, rate_limiter
+    )
+
+    # Initialize file index manager (Index 2)
+    file_index_manager = FileIndexManager(
+        config, chroma, llm_provider, embedding_provider,
+        rate_limiter, checkpoint_manager, analysis_repo
+    )
+
+    # Initialize function index manager (Index 3)
+    function_index_manager = FunctionIndexManager(
+        config, chroma, llm_provider, embedding_provider,
+        rate_limiter, checkpoint_manager, analysis_repo
+    )
+
+    logger.info("Web admin portal initialized (3-index system)")
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _get_unique_projects() -> List[str]:
+    """Get unique project paths from checkpoint database."""
+    cursor = checkpoint_manager.conn.cursor()
+
+    # Get all unique project paths from all three index tables
+    project_paths = set()
+
+    # From project_analysis
+    cursor.execute("SELECT DISTINCT project_path FROM project_analysis")
+    for row in cursor.fetchall():
+        project_paths.add(row[0])
+
+    # From file_index_checkpoints
+    cursor.execute("SELECT DISTINCT project_path FROM file_index_checkpoints")
+    for row in cursor.fetchall():
+        project_paths.add(row[0])
+
+    # From function_index_checkpoints
+    cursor.execute("SELECT DISTINCT project_path FROM function_index_checkpoints")
+    for row in cursor.fetchall():
+        project_paths.add(row[0])
+
+    return list(project_paths)
+
+
+def _build_project_data(project_str: str) -> dict:
+    """Build project data dictionary from all indices."""
+    # Get index status
+    stats = checkpoint_manager.get_all_index_stats(project_str)
+
+    # Get analysis data
+    analysis = analysis_repo.get_analysis(project_str)
+
+    # Build project data
+    project_name = Path(project_str).name
+    project_description = ""
+    tech_stack = []
+    frameworks = []
+    architecture_type = "unknown"
+
+    if analysis:
+        if analysis.project_description and analysis.project_description.value:
+            project_description = analysis.project_description.value
+        if analysis.languages and analysis.languages.value:
+            tech_stack = analysis.languages.value
+        if analysis.frameworks and analysis.frameworks.value:
+            frameworks = analysis.frameworks.value
+        if analysis.architecture and analysis.architecture.value:
+            architecture_type = analysis.architecture.value
+        project_name = project_name  # Could enhance with actual name from analysis
+
+    # Get total files from file index
+    total_files = stats["files"]["completed"]
+
+    # Get total functions from function index
+    total_functions = stats["functions"]["total_functions"]
+
+    # Determine index statuses
+    analysis_status = stats["analysis"]["status"]
+    files_status = "completed" if stats["files"]["completed"] > 0 else "pending"
+    functions_status = "completed" if stats["functions"]["completed"] > 0 else "pending"
+
+    # Get indexed_at timestamp (use most recent)
+    indexed_at = None
+    try:
+        cursor = checkpoint_manager.conn.cursor()
+        cursor.execute("""
+            SELECT MAX(created_at) FROM (
+                SELECT created_at FROM project_analysis WHERE project_path = ?
+                UNION ALL
+                SELECT created_at FROM file_index_checkpoints WHERE project_path = ?
+                UNION ALL
+                SELECT created_at FROM function_index_checkpoints WHERE project_path = ?
+            )
+        """, (project_str, project_str, project_str))
+        row = cursor.fetchone()
+        if row and row[0]:
+            # Convert timestamp string to unix timestamp
+            from datetime import datetime
+            dt = datetime.fromisoformat(row[0].replace('Z', '+00:00'))
+            indexed_at = int(dt.timestamp())
+    except Exception as e:
+        logger.warning(f"Failed to get indexed_at for {project_str}: {e}")
+
+    return {
+        "project_name": project_name,
+        "project_path": project_str,
+        "project_description": project_description,
+        "tech_stack": tech_stack,
+        "frameworks": frameworks,
+        "architecture_type": architecture_type,
+        "total_files": total_files,
+        "total_functions": total_functions,
+        "indexed_at": indexed_at,
+        "analysis_status": analysis_status,
+        "files_status": files_status,
+        "functions_status": functions_status
+    }
 
 
 # ============================================================================
@@ -84,6 +221,8 @@ async def list_projects():
     """
     Получить список всех индексированных проектов.
 
+    Aggregates data from all three indices (analysis, files, functions).
+
     Returns:
         {
             "total": int,
@@ -91,37 +230,34 @@ async def list_projects():
                 {
                     "project_name": str,
                     "project_path": str,
+                    "project_description": str,
                     "tech_stack": List[str],
                     "frameworks": List[str],
                     "architecture_type": str,
                     "total_files": int,
-                    "collection_name": str,
-                    "indexed_at": str
+                    "indexed_at": int,
+                    "analysis_status": str,
+                    "files_status": str,
+                    "functions_status": str
                 }
             ]
         }
     """
     try:
-        projects = chroma.list_all_projects()
+        # Get unique project paths from checkpoint manager
+        unique_projects = _get_unique_projects()
 
-        # Сортировка по дате индексации
-        projects.sort(key=lambda p: p.get("indexed_at", 0) or 0, reverse=True)
+        projects_list = []
+        for project_str in unique_projects:
+            project_data = _build_project_data(project_str)
+            projects_list.append(project_data)
+
+        # Sort by project path
+        projects_list.sort(key=lambda p: p["project_path"])
 
         return {
-            "total": len(projects),
-            "projects": [
-                {
-                    "project_name": p["project_name"],
-                    "project_path": p["project_path"],
-                    "tech_stack": p.get("tech_stack", []),
-                    "frameworks": p.get("frameworks", []),
-                    "architecture_type": p.get("architecture_type", "unknown"),
-                    "total_files": p["total_documents"] - 1,  # Exclude context doc
-                    "collection_name": p["collection_name"],
-                    "indexed_at": p.get("indexed_at")
-                }
-                for p in projects
-            ]
+            "total": len(projects_list),
+            "projects": projects_list
         }
     except Exception as e:
         logger.error(f"Failed to list projects: {e}")
@@ -146,20 +282,32 @@ async def get_project_info(project_path: str):
     """
     try:
         path = Path(project_path).resolve()
-        stats = chroma.get_project_stats(path)
+        project_str = str(path)
 
-        if not stats["exists"]:
-            raise HTTPException(status_code=404, detail="Project not indexed")
+        # Try to get analysis from Index 1
+        analysis = analysis_repo.get_analysis(project_str)
 
-        context = await indexer.get_project_context(path)
-
-        if context:
+        if analysis:
+            context = analysis.to_project_context()
             return {
                 "status": "indexed",
-                "project_id": stats["collection_name"],
-                "project_context": context,
-                "stats": {"total_documents": stats["total_documents"]}
+                "project_id": chroma._get_collection_name(path, 'files'),
+                "project_context": {
+                    "project_name": context.project_name,
+                    "project_description": context.project_description,
+                    "tech_stack": context.tech_stack,
+                    "frameworks": context.frameworks,
+                    "architecture_type": context.architecture_type,
+                    "key_entry_points": context.key_entry_points,
+                    "purpose": context.purpose
+                },
+                "stats": checkpoint_manager.get_all_index_stats(project_str)
             }
+
+        # Fallback to ChromaDB stats
+        stats = chroma.get_project_stats(path)
+        if not stats["exists"]:
+            raise HTTPException(status_code=404, detail="Project not indexed")
 
         return {"status": "indexed", "stats": stats}
 
@@ -196,7 +344,7 @@ async def list_project_files(project_path: str, limit: int = 100, offset: int = 
     """
     try:
         path = Path(project_path).resolve()
-        collection = chroma.get_or_create_collection(path)
+        collection = chroma.get_or_create_collection(path, collection_type='files')
 
         # Получить все документы (кроме __project_context__)
         results = collection.get(
@@ -265,7 +413,8 @@ async def search_in_project(
     try:
         path = Path(project_path).resolve()
 
-        result = await indexer.search_code(
+        # Use file_index_manager for search
+        result = await file_index_manager.search_files(
             project_path=path,
             query=query,
             n_results=n_results,
@@ -308,7 +457,7 @@ async def get_file_chunks(project_path: str, file_path: str):
     """
     try:
         path = Path(project_path).resolve()
-        collection = chroma.get_or_create_collection(path)
+        collection = chroma.get_or_create_collection(path, collection_type='files')
 
         # Получить все документы для этого файла
         results = collection.get(
@@ -382,8 +531,8 @@ async def update_file_index(project_path: str, request: dict):
         if not file_paths:
             raise HTTPException(status_code=400, detail="file_paths is required")
 
-        # Вызываем метод IndexManager для обновления файлов
-        result = await indexer.update_files(path, file_paths)
+        # Use file_index_manager for updating files
+        result = await file_index_manager.update_files(path, file_paths)
 
         return result
 
@@ -413,6 +562,455 @@ async def delete_project(project_path: str):
 
     except Exception as e:
         logger.error(f"Failed to delete project: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Index 1: Project Analysis API
+# ============================================================================
+
+@app.get("/api/projects/{project_path:path}/analysis")
+async def get_project_analysis(project_path: str):
+    """
+    Get project analysis result (Index 1).
+
+    Returns:
+        {
+            "status": "success",
+            "analysis": {...}
+        }
+    """
+    try:
+        path = Path(project_path).resolve()
+        result = analysis_repo.get_analysis(str(path))
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Project not analyzed")
+
+        return {
+            "status": "success",
+            "project_path": str(path),
+            "completed": result.completed,
+            "iteration_count": result.iteration_count,
+            "files_analyzed": result.files_analyzed,
+            "analysis": {
+                "description": result.project_description.value,
+                "description_confidence": result.project_description.confidence,
+                "languages": result.languages.value,
+                "languages_confidence": result.languages.confidence,
+                "frameworks": result.frameworks.value,
+                "frameworks_confidence": result.frameworks.confidence,
+                "modules": result.modules.value,
+                "modules_confidence": result.modules.confidence,
+                "entry_points": result.entry_points.value,
+                "entry_points_confidence": result.entry_points.confidence,
+                "architecture": result.architecture.value,
+                "architecture_confidence": result.architecture.confidence
+            },
+            "min_confidence": result.min_confidence()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get project analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/analysis/iterations")
+async def get_analysis_iterations(project_path: str):
+    """
+    Get analysis iterations history.
+
+    Returns list of iteration snapshots.
+    """
+    try:
+        path = Path(project_path).resolve()
+
+        cursor = checkpoint_manager.conn.cursor()
+        cursor.execute("""
+            SELECT iteration, files_requested, files_read, snapshot, created_at
+            FROM analysis_iterations
+            WHERE project_path = ?
+            ORDER BY iteration ASC
+        """, (str(path),))
+
+        iterations = []
+        for row in cursor.fetchall():
+            import json
+            iterations.append({
+                "iteration": row[0],
+                "files_requested": json.loads(row[1]) if row[1] else [],
+                "files_read": json.loads(row[2]) if row[2] else [],
+                "created_at": row[4]
+            })
+
+        return {
+            "status": "success",
+            "total": len(iterations),
+            "iterations": iterations
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get analysis iterations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/projects/{project_path:path}/analysis/start")
+async def start_project_analysis(project_path: str, request: dict = None):
+    """
+    Start or resume project analysis (Index 1).
+
+    Request body (optional):
+        {
+            "force_reindex": false
+        }
+    """
+    try:
+        path = Path(project_path).resolve()
+        force = request.get("force_reindex", False) if request else False
+
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Project path not found")
+
+        result = await iterative_analyzer.analyze(path, force)
+
+        return {
+            "status": "success" if result.completed else "partial",
+            "completed": result.completed,
+            "iteration_count": result.iteration_count,
+            "min_confidence": result.min_confidence()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Index 3: Functions API
+# ============================================================================
+
+@app.get("/api/projects/{project_path:path}/functions")
+async def list_functions(
+    project_path: str,
+    language: Optional[str] = None,
+    class_name: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """
+    List all indexed functions for a project.
+    """
+    try:
+        path = Path(project_path).resolve()
+        collection = chroma.get_or_create_collection(path, collection_type='functions')
+
+        # Build where filter
+        where = {}
+        if language:
+            where["language"] = language
+        if class_name:
+            where["class_name"] = class_name
+
+        results = collection.get(
+            where=where if where else None,
+            limit=limit + offset,
+            include=["metadatas"]
+        )
+
+        if not results or not results["metadatas"]:
+            return {"status": "success", "total": 0, "functions": []}
+
+        # Format and paginate
+        functions = []
+        for i, metadata in enumerate(results["metadatas"]):
+            if i < offset:
+                continue
+            if len(functions) >= limit:
+                break
+
+            functions.append({
+                "id": results["ids"][i],
+                "name": metadata.get("function_name"),
+                "file_path": metadata.get("relative_path"),
+                "line_start": metadata.get("line_start"),
+                "line_end": metadata.get("line_end"),
+                "class_name": metadata.get("class_name"),
+                "is_method": metadata.get("is_method"),
+                "is_async": metadata.get("is_async"),
+                "language": metadata.get("language"),
+                "description": metadata.get("description"),
+                "complexity": metadata.get("complexity")
+            })
+
+        return {
+            "status": "success",
+            "total": len(results["ids"]),
+            "functions": functions
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to list functions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/functions/search")
+async def search_functions_api(
+    project_path: str,
+    q: str,
+    n_results: int = 10,
+    language: Optional[str] = None,
+    class_name: Optional[str] = None
+):
+    """
+    Semantic search for functions.
+    """
+    try:
+        path = Path(project_path).resolve()
+
+        result = await function_index_manager.search_functions(
+            path, q, n_results, language, class_name
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to search functions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/functions/{function_id}")
+async def get_function_details(project_path: str, function_id: str):
+    """
+    Get detailed information about a specific function.
+    """
+    try:
+        path = Path(project_path).resolve()
+
+        result = await function_index_manager.get_function_info(path, function_id)
+
+        if result.get("status") == "failed":
+            raise HTTPException(status_code=404, detail=result.get("error"))
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get function details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_path:path}/files/{file_path:path}/functions")
+async def get_file_functions(project_path: str, file_path: str):
+    """
+    Get all functions in a specific file.
+    """
+    try:
+        path = Path(project_path).resolve()
+        collection = chroma.get_or_create_collection(path, collection_type='functions')
+
+        results = collection.get(
+            where={"relative_path": file_path},
+            include=["documents", "metadatas"]
+        )
+
+        if not results or not results["ids"]:
+            return {"status": "success", "total": 0, "functions": []}
+
+        functions = []
+        for i, metadata in enumerate(results["metadatas"]):
+            functions.append({
+                "id": results["ids"][i],
+                "name": metadata.get("function_name"),
+                "line_start": metadata.get("line_start"),
+                "line_end": metadata.get("line_end"),
+                "class_name": metadata.get("class_name"),
+                "is_method": metadata.get("is_method"),
+                "is_async": metadata.get("is_async"),
+                "description": metadata.get("description"),
+                "purpose": metadata.get("purpose"),
+                "complexity": metadata.get("complexity"),
+                "code": results["documents"][i]
+            })
+
+        # Sort by line number
+        functions.sort(key=lambda f: f.get("line_start", 0))
+
+        return {
+            "status": "success",
+            "total": len(functions),
+            "file_path": file_path,
+            "functions": functions
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get file functions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/projects/{project_path:path}/functions/reindex")
+async def reindex_functions(project_path: str, request: dict = None):
+    """
+    Reindex functions for a project.
+
+    Request body (optional):
+        {
+            "force_reindex": false
+        }
+    """
+    try:
+        path = Path(project_path).resolve()
+        force = request.get("force_reindex", False) if request else False
+
+        result = await function_index_manager.index_functions(path, force)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to reindex functions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Combined Index Status API
+# ============================================================================
+
+async def _get_actual_file_count(project_path: Path, index_type: str = "files") -> int:
+    """
+    Get actual number of files in project that would be indexed.
+
+    Args:
+        project_path: Project root path
+        index_type: "files" or "functions" to use appropriate patterns
+
+    Returns:
+        Count of files that match indexing criteria
+    """
+    try:
+        # Get analysis to determine languages/patterns
+        project_str = str(project_path)
+        analysis = analysis_repo.get_analysis(project_str)
+
+        # Determine patterns based on index type and analysis
+        if index_type == "files":
+            # Use file index patterns
+            include_patterns = config.indexing.file_patterns or ["**/*.py", "**/*.js", "**/*.ts", "**/*.kt", "**/*.java"]
+            exclude_patterns = config.indexing.exclude_patterns or []
+        else:  # functions
+            # Use function index patterns (only source files)
+            if analysis and analysis.languages:
+                languages = analysis.languages.value if hasattr(analysis.languages, 'value') else analysis.languages
+                # Build patterns based on detected languages
+                lang_extensions = {
+                    'python': '**/*.py',
+                    'javascript': '**/*.js',
+                    'typescript': '**/*.ts',
+                    'kotlin': '**/*.kt',
+                    'java': '**/*.java',
+                    'go': '**/*.go',
+                    'rust': '**/*.rs'
+                }
+                include_patterns = [lang_extensions.get(lang.lower(), f'**/*.{lang.lower()}')
+                                   for lang in languages if isinstance(lang, str)]
+            else:
+                include_patterns = ["**/*.py", "**/*.js", "**/*.ts", "**/*.kt", "**/*.java"]
+            exclude_patterns = config.indexing.exclude_patterns or []
+
+        # Scan project
+        files = await scan_project(
+            project_path=project_path,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            respect_gitignore=True,
+            max_file_size_mb=config.indexing.max_file_size_mb
+        )
+
+        return len(files)
+    except Exception as e:
+        logger.warning(f"Failed to count files in {project_path}: {e}")
+        return 0
+
+@app.get("/api/projects/{project_path:path}/index-status")
+async def get_index_status(project_path: str):
+    """
+    Get status of all three indices for a project.
+    """
+    try:
+        path = Path(project_path).resolve()
+        project_str = str(path)
+
+        stats = checkpoint_manager.get_all_index_stats(project_str)
+        analysis = analysis_repo.get_analysis(project_str)
+
+        # Get actual file counts for accurate totals
+        actual_file_count = await _get_actual_file_count(path, "files")
+        actual_source_file_count = await _get_actual_file_count(path, "functions")
+
+        # Determine file index status
+        files_indexed = stats["files"]["total"]
+        files_completed = stats["files"]["completed"]
+        files_failed = stats["files"]["failed"]
+
+        if actual_file_count > 0 and files_completed == actual_file_count:
+            files_status = "completed"
+        elif files_failed > 0 and files_completed + files_failed == actual_file_count:
+            files_status = "partial"
+        elif files_completed > 0 or files_failed > 0:
+            files_status = "in_progress"
+        else:
+            files_status = "pending"
+
+        # Determine function index status
+        func_indexed = stats["functions"]["total"]
+        func_completed = stats["functions"]["completed"]
+        func_failed = stats["functions"]["failed"]
+
+        if actual_source_file_count > 0 and func_completed == actual_source_file_count:
+            functions_status = "completed"
+        elif func_failed > 0 and func_completed + func_failed == actual_source_file_count:
+            functions_status = "partial"
+        elif func_completed > 0 or func_failed > 0:
+            functions_status = "in_progress"
+        else:
+            functions_status = "pending"
+
+        return {
+            "status": "success",
+            "project_path": project_str,
+            "indices": {
+                "analysis": {
+                    "status": stats["analysis"]["status"],
+                    "iteration_count": stats["analysis"]["iteration_count"],
+                    "min_confidence": stats["analysis"]["min_confidence"],
+                    "files_analyzed": stats["analysis"]["files_analyzed"],
+                    "languages": analysis.languages.value if analysis else None,
+                    "frameworks": analysis.frameworks.value if analysis else None
+                },
+                "files": {
+                    "status": files_status,
+                    "total_files": actual_file_count,  # Реальное количество файлов в проекте
+                    "indexed_files": files_indexed,  # Файлы начавшие индексацию
+                    "completed_files": files_completed,
+                    "failed_files": files_failed,
+                    "total_chunks": stats["files"]["total_chunks"]
+                },
+                "functions": {
+                    "status": functions_status,
+                    "total_files": actual_source_file_count,  # Реальное количество source файлов
+                    "indexed_files": func_indexed,  # Файлы начавшие индексацию
+                    "completed_files": func_completed,
+                    "failed_files": func_failed,
+                    "total_functions": stats["functions"]["total_functions"]
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get index status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -887,6 +1485,58 @@ async def clear_checkpoints(project_path: str, index_type: Optional[str] = None)
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.get("/api/internal/file-checkpoints")
+    async def get_file_checkpoints(project_path: str):
+        """Get all file index checkpoints for a project."""
+        try:
+            cursor = checkpoint_manager.conn.cursor()
+            cursor.execute("""
+                SELECT relative_path, status, chunks_count, created_at
+                FROM file_index_checkpoints
+                WHERE project_path = ?
+                ORDER BY created_at DESC
+            """, (project_path,))
+
+            checkpoints = []
+            for row in cursor.fetchall():
+                checkpoints.append({
+                    "relative_path": row[0],
+                    "status": row[1],
+                    "chunks_count": row[2],
+                    "created_at": row[3]
+                })
+
+            return {"checkpoints": checkpoints}
+        except Exception as e:
+            logger.error(f"Failed to get file checkpoints: {e}")
+            return {"checkpoints": []}
+
+    @app.get("/api/internal/function-checkpoints")
+    async def get_function_checkpoints(project_path: str):
+        """Get all function index checkpoints for a project."""
+        try:
+            cursor = checkpoint_manager.conn.cursor()
+            cursor.execute("""
+                SELECT relative_path, status, functions_count, created_at
+                FROM function_index_checkpoints
+                WHERE project_path = ?
+                ORDER BY created_at DESC
+            """, (project_path,))
+
+            checkpoints = []
+            for row in cursor.fetchall():
+                checkpoints.append({
+                    "relative_path": row[0],
+                    "status": row[1],
+                    "functions_count": row[2],
+                    "created_at": row[3]
+                })
+
+            return {"checkpoints": checkpoints}
+        except Exception as e:
+            logger.error(f"Failed to get function checkpoints: {e}")
+            return {"checkpoints": []}
 
     @app.get("/")
     async def serve_frontend():
